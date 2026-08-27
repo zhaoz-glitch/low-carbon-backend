@@ -8,7 +8,9 @@ Covers ~20 well-known US stocks across multiple sectors.
 """
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date
+
+from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +137,28 @@ def _build_carbon_history_rows(symbol):
     return rows
 
 
+def seed_demo_user(db):
+    """Ensure the demo account exists (safe under gunicorn multi-worker startup).
+
+    Email: demo@lowcarbon.io
+    Password: demo123456
+    """
+    from app.models.user import User
+
+    if User.query.filter_by(email="demo@lowcarbon.io").first():
+        return
+
+    demo = User(email="demo@lowcarbon.io", name="Demo Investor")
+    demo.set_password("demo123456")
+    db.session.add(demo)
+    try:
+        db.session.commit()
+        logger.info("Seeded demo user demo@lowcarbon.io")
+    except IntegrityError:
+        db.session.rollback()
+        logger.info("Demo user already exists (concurrent seed) — skipped")
+
+
 def seed_mock_data(db):
     """Seed the database with mock companies, financials, and carbon data.
 
@@ -232,9 +256,16 @@ def seed_mock_data(db):
     for tpl in templates:
         db.session.add(tpl)
 
-    db.session.commit()
-    logger.info("Mock data seeded: %d companies, %d templates",
-                len(SAMPLE_COMPANIES), len(templates))
+    try:
+        db.session.commit()
+        logger.info(
+            "Mock data seeded: %d companies, %d templates",
+            len(SAMPLE_COMPANIES),
+            len(templates),
+        )
+    except IntegrityError:
+        db.session.rollback()
+        logger.info("Mock data already seeded (concurrent seed) — skipped")
 
 
 def get_carbon_trend(symbol):
