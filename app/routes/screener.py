@@ -15,6 +15,7 @@ from app.services.tradingview_service import tradingview_service
 from app.services.carbon_service import carbon_service
 from app.services.screener_service import screener_service
 from app.utils.csv_export import generate_csv
+from app.utils.auth import login_required
 from app.models.preset_template import PresetTemplate
 from app.extensions import db
 
@@ -24,6 +25,7 @@ screener_bp = Blueprint("screener", __name__)
 
 
 @screener_bp.route("/screener/fields", methods=["GET"])
+@login_required
 def get_fields():
     """Return all filter field metadata for the frontend dynamic form.
 
@@ -52,6 +54,7 @@ def get_fields():
 
 
 @screener_bp.route("/screener/run", methods=["POST"])
+@login_required
 def run_screener():
     """Execute the screening pipeline (core endpoint).
 
@@ -102,6 +105,7 @@ def run_screener():
 
 
 @screener_bp.route("/screener/export", methods=["POST"])
+@login_required
 def export_screener():
     """Export screening results as a CSV file.
 
@@ -139,6 +143,7 @@ def export_screener():
 
 
 @screener_bp.route("/screener/templates", methods=["GET"])
+@login_required
 def get_templates():
     """List all preset filter templates (PRD section 3.2)."""
     templates = PresetTemplate.query.filter_by(is_active=True).all()
@@ -148,6 +153,7 @@ def get_templates():
 
 
 @screener_bp.route("/screener/templates/<int:template_id>", methods=["GET"])
+@login_required
 def get_template(template_id):
     """Get a single preset template by ID."""
     tpl = PresetTemplate.query.get_or_404(template_id)

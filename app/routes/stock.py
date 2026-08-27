@@ -11,6 +11,7 @@ from flask import Blueprint, jsonify
 from app.models.company import Company
 from app.models.financial_metric import FinancialMetric
 from app.models.carbon_emission import CarbonEmission
+from app.utils.auth import login_required
 from app.utils.mock_data import get_carbon_trend
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,7 @@ stock_bp = Blueprint("stock", __name__)
 
 
 @stock_bp.route("/stock/<string:symbol>", methods=["GET"])
+@login_required
 def get_stock_detail(symbol):
     """Return detailed information for a single stock.
 
@@ -61,6 +63,7 @@ def get_stock_detail(symbol):
 
 
 @stock_bp.route("/stock/<string:symbol>/carbon-trend", methods=["GET"])
+@login_required
 def get_carbon_trend_endpoint(symbol):
     """Return 5-year carbon emission trend data for the detail drawer chart.
 

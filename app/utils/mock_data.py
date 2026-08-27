@@ -92,29 +92,47 @@ SAMPLE_CARBON = {
 }
 
 
-# --- Sample 5-year carbon history for trend charts ---
-def _generate_carbon_history(symbol, latest_year, latest_intensity, latest_yoy):
-    """Generate 5 years of mock carbon data for the trend chart."""
-    history = []
-    intensity = latest_intensity
+def _build_carbon_history_rows(symbol):
+    """Build 5 annual CarbonEmission rows (latest_year-4 .. latest_year).
+
+    The latest year uses the values from SAMPLE_CARBON; earlier years are
+    back-computed from the same formula previously used for the in-memory
+    trend dict, so the chart output is unchanged — but every year now lives
+    in the ``carbon_emissions`` table instead of Python memory.
+    """
+    latest_year, s1, s2, latest_ci, latest_yoy, revenue = SAMPLE_CARBON[symbol]
+    scope_ratio = s1 / (s1 + s2) if (s1 + s2) else 0.5
+
+    rows = []
+    intensities = []
     for year_offset in range(4, -1, -1):
         year = latest_year - year_offset
-        # Simulate gradual reduction (or increase) working backward
         if year_offset == 0:
-            ci = latest_intensity
+            ci = latest_ci
         else:
-            ci = round(latest_intensity * (1 + abs(latest_yoy / 100) * year_offset * 0.8), 2)
-        history.append({
+            ci = round(latest_ci * (1 + abs(latest_yoy / 100) * year_offset * 0.8), 2)
+        intensities.append((year, ci))
+
+    for i, (year, ci) in enumerate(intensities):
+        total = round(ci * revenue / 1000000, 2)
+        if i == 0:
+            yoy = None
+        else:
+            prev_ci = intensities[i - 1][1]
+            yoy = round((ci - prev_ci) / prev_ci * 100, 2) if prev_ci else None
+        rows.append({
+            "symbol": symbol,
             "report_year": year,
+            "scope1": round(total * scope_ratio, 2),
+            "scope2": round(total * (1 - scope_ratio), 2),
+            "total_emissions": total,
             "carbon_intensity_revenue": ci,
-            "total_emissions": round(ci * SAMPLE_CARBON[symbol][5] / 1000000, 2),
+            "carbon_change_yoy": yoy,
+            "revenue": revenue,
+            "data_source": "mock",
+            "has_carbon_data": True,
         })
-    return history
-
-
-CARBON_TRENDS = {}
-for sym, (yr, s1, s2, ci, yoy, rev) in SAMPLE_CARBON.items():
-    CARBON_TRENDS[sym] = _generate_carbon_history(sym, yr, ci, yoy)
+    return rows
 
 
 def seed_mock_data(db):
@@ -164,21 +182,9 @@ def seed_mock_data(db):
         )
         db.session.add(fm)
 
-        # Carbon emissions
-        carbon = SAMPLE_CARBON[sym]
-        ce = CarbonEmission(
-            symbol=sym,
-            report_year=carbon[0],
-            scope1=carbon[1],
-            scope2=carbon[2],
-            total_emissions=carbon[1] + carbon[2],
-            carbon_intensity_revenue=carbon[3],
-            carbon_change_yoy=carbon[4],
-            revenue=carbon[5],
-            data_source="mock",
-            has_carbon_data=True,
-        )
-        db.session.add(ce)
+        # Carbon emissions — 5 years of history per company
+        for row in _build_carbon_history_rows(sym):
+            db.session.add(CarbonEmission(**row))
 
     # Seed preset templates from the PRD
     templates = [
@@ -234,19 +240,16 @@ def seed_mock_data(db):
 def get_carbon_trend(symbol):
     """Return 5-year carbon trend data for a given symbol.
 
-    Used by GET /api/stock/{symbol}/carbon-trend endpoint.
+    Used by GET /api/stock/{symbol}/carbon-trend endpoint.  All data now
+    comes from the ``carbon_emissions`` table via an ORM query — no more
+    in-memory dicts.
     """
-    if symbol in CARBON_TRENDS:
-        return CARBON_TRENDS[symbol]
-
-    # Fallback: query from database
     from app.models.carbon_emission import CarbonEmission
+
     records = (
         CarbonEmission.query
         .filter_by(symbol=symbol)
         .order_by(CarbonEmission.report_year.asc())
         .all()
     )
-    if records:
-        return [r.to_dict() for r in records]
-    return []
+    return [r.to_dict() for r in records]
