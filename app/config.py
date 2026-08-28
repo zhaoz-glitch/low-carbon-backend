@@ -1,9 +1,49 @@
-"""Application configuration."""
+"""Application configuration.
+
+Database selection is driven by the ``DATABASE_URL`` environment variable:
+
+* ``DATABASE_URL`` unset / empty  → SQLite at ``instance/low_carbon_screener.db``
+                                      (used for local development)
+* ``DATABASE_URL=mysql://...``     → MySQL via ``pymysql`` (used by the Railway
+                                      MySQL plugin).  The scheme is rewritten to
+                                      ``mysql+pymysql://`` so SQLAlchemy picks up
+                                      the pure-Python driver and we don't need
+                                      to ship a C compiler on the image.
+
+Postgres, MS SQL, etc. work too — only MySQL needs the explicit driver prefix
+because PyMySQL doesn't register the ``mysql://`` URI itself.
+"""
 
 import os
+import urllib.parse
+
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def _build_database_uri() -> str:
+    """Return a SQLAlchemy-compatible database URI.
+
+    The ``DATABASE_URL`` env var follows the
+    ``scheme://user:password@host:port/dbname`` convention popularised by
+    Heroku / Railway / Render.  When the scheme is plain ``mysql`` we swap it
+    for ``mysql+pymysql`` so PyMySQL handles the protocol.
+    """
+    raw = os.environ.get("DATABASE_URL")
+    if not raw:
+        return "sqlite:///low_carbon_screener.db"
+
+    # Older SQLAlchemy used 'postgres://' — normalise to 'postgresql://'
+    if raw.startswith("postgres://"):
+        raw = "postgresql://" + raw[len("postgres://"):]
+
+    if raw.startswith("mysql://"):
+        # mysqlclient is faster but needs libmysqlclient-dev on the image.
+        # PyMySQL is pure-Python and works out of the box on slim Railway images.
+        raw = "mysql+pymysql://" + raw[len("mysql://"):]
+
+    return raw
 
 
 class Config:
@@ -12,11 +52,15 @@ class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key-change-me")
 
     # Database
-    SQLALCHEMY_DATABASE_URI = os.environ.get(
-        "DATABASE_URL", "sqlite:///low_carbon_screener.db"
-    )
+    SQLALCHEMY_DATABASE_URI = _build_database_uri()
     SQLALCHEMY_TRACK_MODIFICATIONS = False
-    SQLALCHEMY_ENGINE_OPTIONS = {"pool_pre_ping": True}
+    # pool_pre_ping avoids "MySQL server has gone away" errors when the
+    # upstream pool recycles idle connections; pool_recycle must stay below
+    # MySQL's ``wait_timeout`` (default 8h, but Railway can be more aggressive).
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        "pool_pre_ping": True,
+        "pool_recycle": 1800,
+    }
 
     # Redis
     REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
