@@ -1,62 +1,162 @@
 """TradingView market data service.
 
-In production this would use the ``tradingview-screener`` Python package
-(community wrapper around TradingView's screener API) to batch-fetch
-financial metrics like PE, turnover, market cap, etc.
+Real data source integration via the ``tradingview-screener`` Python package
+(v3.x, sync HTTP wrapper around TradingView's public scanner API — no API key
+required).  Field names map 1:1 to TradingView screener columns:
 
-For MVP / development without API access, the service falls back to data
-already stored in the local database (seeded by ``mock_data.py``).
+    TradingView column        → FinancialMetric column
+    ----------------------------------------------------
+    market_cap_basic          → market_cap
+    price_earnings_ttm        → pe_ttm
+    price_book_value          → pb
+    dividend_yield_recent     → dividend_yield
+    turnover                  → turnover
+    change_1_year             → week_52_change
+    net_margin                → net_profit_margin
+    close / volume            → close / volume
+
+The service is best-effort: any failure (package missing, network error,
+TradingView unreachable) falls back to ``None`` so the caller transparently
+uses the local database (seeded by ``mock_data.py``).
+
+Docs: https://github.com/shner-elmo/TradingView-Screener
 """
 
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
+# TradingView screener columns → internal field names (FinancialMetric schema)
+TV_COLUMNS = [
+    "name",
+    "close",
+    "volume",
+    "market_cap_basic",
+    "price_earnings_ttm",
+    "price_book_value",
+    "dividend_yield_recent",
+    "turnover",
+    "change_1_year",
+    "net_margin",
+    "sector",
+]
+
+COLUMN_MAP = {
+    "market_cap_basic": "market_cap",
+    "price_earnings_ttm": "pe_ttm",
+    "price_book_value": "pb",
+    "dividend_yield_recent": "dividend_yield",
+    "change_1_year": "week_52_change",
+    "net_margin": "net_profit_margin",
+}
+
 
 class TradingViewService:
-    """Wrapper around TradingView screener data."""
+    """Wrapper around TradingView screener data (real integration)."""
 
     def __init__(self, app=None):
         self.app = app
         self._enabled = True
-        self._cache = {}  # in-memory cache (replace with Redis in production)
+        self._cache = {}  # in-memory cache: {"data": [...], "ts": epoch}
+        self._cache_ttl = 300  # 5 minutes (matches PRD cache spec)
 
     def init_app(self, app):
         self.app = app
         self._enabled = app.config.get("TRADINGVIEW_ENABLED", True)
+        self._cache_ttl = app.config.get("CACHE_TTL", 300)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def fetch_financial_data(self, symbols=None, filters=None):
         """Fetch financial metrics for the given symbols.
 
         Args:
-            symbols: list of ticker symbols, or None for all
-            filters: dict of TradingView screener filters
+            symbols: list of ticker symbols, or None for the default universe
+            filters: optional dict of TradingView screener filters
+                     (column → (op, value))
 
         Returns:
-            list of dicts with financial metric fields.
+            list of dicts with FinancialMetric-schema fields,
+            or None on any failure (caller falls back to DB).
         """
         if not self._enabled:
             logger.info("TradingView disabled — using database fallback")
-            return None  # caller falls back to DB
+            return None
 
-        # --- Production implementation (pseudo-code) ---
-        # from tradingview_screener import Query
-        # q = Query()
-        # if symbols:
-        #     q.set_filter("name", "in", symbols)
-        # if filters:
-        #     for field, (op, value) in filters.items():
-        #         q.set_filter(field, op, value)
-        # columns = ["name", "close", "volume", "market_cap_basic",
-        #            "price_earnings_ttm", "price_book_value",
-        #            "dividend_yield_recent", "turnover", "change_1_year",
-        #            "net_margin"]
-        # return q.select(*columns).get_scanner_data()
-        #
-        # Then cache results in Redis with TTL = CACHE_TTL (5 min)
+        # Cache is only used for full-universe fetches (no symbol subset)
+        cache_key = "all" if not symbols else None
+        if cache_key and self._cache.get(cache_key):
+            age = time.time() - self._cache[cache_key]["ts"]
+            if age < self._cache_ttl:
+                return self._cache[cache_key]["data"]
 
-        logger.info("TradingView fetch not implemented — DB fallback used")
-        return None
+        try:
+            rows = self._query_scanner(symbols, filters)
+        except ImportError:
+            logger.warning(
+                "tradingview-screener not installed — DB fallback used. "
+                "Install with: pip install tradingview-screener"
+            )
+            return None
+        except Exception as e:  # noqa: BLE001 — any upstream error → fallback
+            logger.error("TradingView query failed: %s", e)
+            return None
+
+        data = [self._normalize(r) for r in rows if r.get("name")]
+        if cache_key:
+            self._cache[cache_key] = {"data": data, "ts": time.time()}
+        logger.info("TradingView fetched %d rows", len(data))
+        return data
+
+    def fetch_and_store(self, symbols=None, db=None):
+        """Fetch from TradingView and upsert into ``financial_metrics``.
+
+        Returns number of rows upserted, or None if fetch failed.
+        """
+        if db is None and self.app is not None:
+            from app.extensions import db as _db
+
+            db = _db
+
+        data = self.fetch_financial_data(symbols=symbols)
+        if data is None:
+            return None
+
+        from app.models.company import Company
+        from app.models.financial_metric import FinancialMetric
+        from datetime import date
+
+        today = date.today()
+        count = 0
+        for row in data:
+            symbol = row.get("symbol")
+            if not symbol:
+                continue
+            # Only upsert companies known in our DB (keeps FK valid)
+            if not Company.query.filter_by(symbol=symbol).first():
+                continue
+            existing = FinancialMetric.query.filter_by(
+                symbol=symbol, date=today
+            ).first()
+            if existing:
+                for key, val in row.items():
+                    if key not in ("symbol", "date") and val is not None:
+                        setattr(existing, key, val)
+            else:
+                db.session.add(
+                    FinancialMetric(symbol=symbol, date=today, **{
+                        k: v for k, v in row.items()
+                        if k not in ("symbol", "date", "sector")
+                    })
+                )
+            count += 1
+
+        db.session.commit()
+        logger.info("Upserted %d financial_metrics rows", count)
+        return count
 
     def get_market_fields_metadata(self):
         """Return metadata for market/technical filter fields.
@@ -143,6 +243,59 @@ class TradingViewService:
                 "update_frequency": "daily",
             },
         ]
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _query_scanner(self, symbols, filters):
+        """Run a TradingView screener query. Raises ImportError if the
+        package is not installed, and propagates upstream errors.
+
+        Uses the tradingview-screener 3.x API (set_markets / where / col).
+        Note: bare tickers ("AAPL") do NOT work with set_tickers in 3.x —
+        it requires "NASDAQ:AAPL" format — so bare symbols are filtered
+        via ``where(col('name').isin([...]))`` instead.
+        """
+        from tradingview_screener import Query, col
+
+        q = Query().select(*TV_COLUMNS).set_markets("america")
+        if symbols:
+            q = q.where(col("name").isin(list(symbols)))
+        else:
+            # Default universe: large caps with known market cap
+            q = q.where(col("market_cap_basic") > 1_000_000_000).limit(1000)
+        if filters:
+            # filters: {column: (op, value)} with op in {>, <, >=, <=}
+            import operator
+
+            ops = {
+                ">": operator.gt,
+                "<": operator.lt,
+                ">=": operator.ge,
+                "<=": operator.le,
+            }
+            exprs = [
+                ops[op](col(column), value)
+                for column, (op, value) in filters.items()
+                if op in ops
+            ]
+            if exprs:
+                q = q.where(*exprs)
+
+        _, df = q.get_scanner_data()
+        return df.to_dict("records")
+
+    @staticmethod
+    def _normalize(row):
+        """Map a raw TradingView row to the FinancialMetric schema."""
+        out = {"symbol": row.get("name"), "sector": row.get("sector")}
+        for col, field in COLUMN_MAP.items():
+            out[field] = row.get(col)
+        # Direct 1:1 columns
+        for col in ("close", "volume", "turnover"):
+            out[col] = row.get(col)
+        return out
 
 
 # Singleton

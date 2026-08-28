@@ -25,12 +25,21 @@ load_dotenv()
 def _build_database_uri() -> str:
     """Return a SQLAlchemy-compatible database URI.
 
-    The ``DATABASE_URL`` env var follows the
-    ``scheme://user:password@host:port/dbname`` convention popularised by
-    Heroku / Railway / Render.  When the scheme is plain ``mysql`` we swap it
-    for ``mysql+pymysql`` so PyMySQL handles the protocol.
+    Resolution order:
+
+    1. ``DATABASE_URL``  (Heroku / Railway / Render convention; takes
+       precedence because operators usually set this on purpose to
+       override the default).
+    2. ``MYSQL_URL``     (auto-injected by the Railway MySQL plugin into
+       every service in the same project — no manual reference variable
+       required).
+    3. SQLite at ``instance/low_carbon_screener.db`` for local dev.
+
+    The ``mysql://`` scheme is rewritten to ``mysql+pymysql://`` so
+    SQLAlchemy picks up the pure-Python driver and we don't need to ship
+    a C compiler on the image.
     """
-    raw = os.environ.get("DATABASE_URL")
+    raw = os.environ.get("DATABASE_URL") or os.environ.get("MYSQL_URL")
     if not raw:
         return "sqlite:///low_carbon_screener.db"
 
@@ -68,6 +77,16 @@ class Config:
 
     # External APIs
     TRADINGVIEW_ENABLED = os.environ.get("TRADINGVIEW_ENABLED", "true").lower() == "true"
+
+    # Clarity AI (primary carbon data provider) — https://developer.clarity.ai
+    # Get Client Key / Secret from Developer Settings in the Clarity AI app.
+    CLARITY_AI_KEY = os.environ.get("CLARITY_AI_KEY", "")
+    CLARITY_AI_SECRET = os.environ.get("CLARITY_AI_SECRET", "")
+    CLARITY_AI_BASE_URL = os.environ.get(
+        "CLARITY_AI_BASE_URL", "https://api.clarity.ai/clarity/v1"
+    )
+
+    # Bavest (secondary carbon provider) & Intrinio (legacy)
     BAVEST_API_KEY = os.environ.get("BAVEST_API_KEY", "")
     BAVEST_BASE_URL = os.environ.get("BAVEST_BASE_URL", "https://api.bavest.co")
     INTRINIO_API_KEY = os.environ.get("INTRINIO_API_KEY", "")
