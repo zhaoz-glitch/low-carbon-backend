@@ -89,6 +89,13 @@ class Config:
     # '{"SPGI": "US78409V1020"}' — merged over the built-in static map.
     ISIN_MAP_JSON = os.environ.get("ISIN_MAP_JSON", "")
 
+    # Climatiq (spend-based carbon estimation provider) — https://www.climatiq.io
+    # Get the API key from the Climatiq dashboard (Account → API Keys).
+    CLIMATIQ_API_KEY = os.environ.get("CLIMATIQ_API_KEY", "")
+    CLIMATIQ_BASE_URL = os.environ.get(
+        "CLIMATIQ_BASE_URL", "https://api.climatiq.io"
+    )
+
     # Bavest (secondary carbon provider) & Intrinio (legacy)
     BAVEST_API_KEY = os.environ.get("BAVEST_API_KEY", "")
     BAVEST_BASE_URL = os.environ.get("BAVEST_BASE_URL", "https://api.bavest.co")

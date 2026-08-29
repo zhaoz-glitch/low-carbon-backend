@@ -39,6 +39,7 @@ TV_COLUMNS = [
     "turnover",
     "change_1_year",
     "net_margin",
+    "total_revenue",
     "sector",
 ]
 
@@ -49,6 +50,7 @@ COLUMN_MAP = {
     "dividend_yield_recent": "dividend_yield",
     "change_1_year": "week_52_change",
     "net_margin": "net_profit_margin",
+    "total_revenue": "revenue",
 }
 
 

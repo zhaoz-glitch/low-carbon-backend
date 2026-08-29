@@ -1,26 +1,32 @@
 """Carbon emission data service.
 
-Real data source integration with the **Clarity AI** REST API
-(https://developer.clarity.ai) as the primary provider, with the Bavest API
-retained as a secondary provider.
+Providers (in priority order):
 
-Data is updated 1-2 times per year per company (annual report cycle).
+1. **Climatiq** (https://www.climatiq.io) — spend-based estimation.
+   Climatiq is an emission-factor engine, not a company disclosure DB:
+   for each TradingView sector we resolve a Money-unit (per-USD) emission
+   factor via ``GET /data/v1/search?unit_type=Money`` and measure its
+   effective kg-CO2e-per-USD with a single ``POST /data/v1/estimate``
+   call ($1M probe).  Company emissions are then computed locally as
+   ``factor × revenue`` — so a full-market backfill costs only one
+   search + one estimate per sector (~2 dozen API calls total).
 
-Clarity AI flow (all standard REST, callable with ``requests``):
+2. **Clarity AI** (https://developer.clarity.ai) — reported (disclosure)
+   data via OAuth token + SFDR async endpoints.  Used when credentials
+   are configured; takes precedence over estimates because reported
+   Scope 1/2 beats modelled values.
 
-1. ``POST /oauth/token`` with Client Key + Secret → Bearer token (60 min TTL)
-2. ``POST /public/securities/sfdr/metric-by-id/async`` with ``metricIds``
-   (CARBON_EMISSIONS, CARBON_EMISSIONS_SCOPE1/2, GHG_INTENSITY) and either
-   ``securityIds`` (ISINs) or ``securityTypes`` → returns a JobId
-3. Poll ``GET /public/jobs/{jobId}`` until complete, then fetch the result
+3. **Bavest** — legacy secondary provider.
 
-If no Clarity AI credentials are configured, the service falls back to
-Bavest (if configured) and finally to the locally seeded database
-(mock data), so the app always works in development.
+4. Local database fallback (mock/seeded data) so the app always works.
+
+Auth: Climatiq uses ``Authorization: Bearer <api key>`` on
+``https://api.climatiq.io`` — see CLIMATIQ_API_KEY in the config.
 """
 
 import logging
 import time
+from datetime import datetime
 
 import requests
 
@@ -37,6 +43,36 @@ CLARITY_METRICS = [
 # Job polling defaults
 JOB_POLL_INTERVAL = 2  # seconds
 JOB_POLL_TIMEOUT = 120  # seconds
+
+# Climatiq: TradingView sector (US market classification) → search query used
+# to find a Money-unit (spend-based, kg CO2e per USD) emission factor.
+# Queries are matched fuzzily by Climatiq's search endpoint; the fallback
+# tries the raw sector name and finally a generic services term.
+CLIMATIQ_SECTOR_QUERIES = {
+    # sector names as returned by the TradingView scanner (US classification)
+    "Finance": "financial and insurance services",
+    "Non-Energy Minerals": "mining and quarrying",
+    "Health Technology": "pharmaceutical manufacturing",
+    "Technology Services": "computer programming and information services",
+    "Electronic Technology": "electronic equipment manufacturing",
+    "Producer Manufacturing": "machinery and equipment manufacturing",
+    "Commercial Services": "business support services",
+    "Process Industries": "chemicals manufacturing",
+    "Consumer Services": "hotels and restaurants services",
+    "Energy Minerals": "crude petroleum and natural gas extraction",
+    "Consumer Non-Durables": "food and beverages manufacturing",
+    "Industrial Services": "industrial and waste management services",
+    "Retail Trade": "retail trade",
+    "Consumer Durables": "motor vehicles and equipment manufacturing",
+    "Utilities": "electricity and gas supply",
+    "Transportation": "transport services",
+    "Distribution Services": "wholesale trade",
+    "Health Services": "hospital and healthcare services",
+    "Communications": "telecommunications",
+    "Government": "public administration and defence",
+    "Miscellaneous": "other services",
+}
+CLIMATIQ_FALLBACK_QUERY = "services"
 
 # Ticker → ISIN mapping for the companies seeded by mock_data plus a few
 # common aliases.  US ISINs are public identifiers ("US" + 9-char CUSIP +
@@ -88,6 +124,11 @@ class CarbonService:
         self._token = None
         self._token_expiry = 0.0
 
+        # Climatiq (spend-based estimation)
+        self._climatiq_key = ""
+        self._climatiq_base = ""
+        self._sector_factors = {}  # sector -> factor entry dict or None
+
         # Ticker → ISIN lookup (static map + env-provided overrides)
         self._isin_map = dict(TICKER_ISIN_MAP)
 
@@ -101,6 +142,10 @@ class CarbonService:
         self._clarity_secret = app.config.get("CLARITY_AI_SECRET", "")
         self._clarity_base = app.config.get(
             "CLARITY_AI_BASE_URL", "https://api.clarity.ai/clarity/v1"
+        )
+        self._climatiq_key = app.config.get("CLIMATIQ_API_KEY", "")
+        self._climatiq_base = app.config.get(
+            "CLIMATIQ_BASE_URL", "https://api.climatiq.io"
         )
         self._bavest_key = app.config.get("BAVEST_API_KEY", "")
         self._bavest_base = app.config.get(
@@ -124,13 +169,16 @@ class CarbonService:
     def fetch_carbon_data(self, symbol):
         """Fetch carbon emission data for a single symbol.
 
-        Tries Clarity AI first, then Bavest.  Returns a dict matching the
+        Tries Clarity AI (reported data), then Climatiq (spend-based
+        estimate), then Bavest.  Returns a dict matching the
         CarbonEmission schema, or None when no provider is configured /
         all fetches fail (caller falls back to DB).
         """
         result = None
         if self._clarity_key and self._clarity_secret:
             result = self._fetch_clarity(symbol)
+        if result is None and self._climatiq_key:
+            result = self._fetch_climatiq(symbol)
         if result is None and self._bavest_key:
             result = self._fetch_bavest(symbol)
         if result is None:
@@ -186,7 +234,7 @@ class CarbonService:
                 "type": "threshold",
                 "unit": "tCO2e/$M",
                 "ops": ["<", ">", "<=", ">="],
-                "source": "Clarity AI",
+                "source": "Climatiq (est.)",
                 "update_frequency": "annual",
                 "description": "每百万美元营收的碳排放量（吨）",
             },
@@ -198,7 +246,7 @@ class CarbonService:
                 "min": 0,
                 "max": 50000000,  # 50M tons
                 "step": 100000,
-                "source": "Clarity AI",
+                "source": "Climatiq (est.)",
                 "update_frequency": "annual",
                 "description": "Scope 1 + Scope 2 总排放量（吨 CO2 当量）",
             },
@@ -208,7 +256,7 @@ class CarbonService:
                 "type": "threshold",
                 "unit": "%",
                 "ops": ["<", ">", "<=", ">="],
-                "source": "Clarity AI",
+                "source": "Climatiq (est.)",
                 "update_frequency": "annual",
                 "description": "碳强度同比下降为负值（减排）",
             },
@@ -226,6 +274,174 @@ class CarbonService:
                 "description": "筛选有/无碳排放数据的公司",
             },
         ]
+
+    # ------------------------------------------------------------------
+    # Climatiq provider (spend-based estimation)
+    # ------------------------------------------------------------------
+
+    def _climatiq_headers(self):
+        return {"Authorization": f"Bearer {self._climatiq_key}"}
+
+    def _climatiq_search_factor(self, query):
+        """Search Climatiq for a public Money-unit (per-USD) emission factor.
+
+        Returns the best emission-factor dict (with ``activity_id``) or
+        None.  Prefers US-region factors, then global (_ZZ), then any
+        public factor.
+        """
+        resp = requests.get(
+            f"{self._climatiq_base}/data/v1/search",
+            headers=self._climatiq_headers(),
+            params={
+                "query": query,
+                "unit_type": "Money",
+                "data_version": "^21",
+                "results_per_page": 10,
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results") or []
+        us = [r for r in results if str(r.get("region", "")).upper().startswith("US")]
+        glob = [r for r in results if r.get("region") in ("_ZZ", "GLOBAL", "GLO")]
+        pool = us or glob or [r for r in results if r.get("access_type") == "public"]
+        for r in pool:
+            if r.get("activity_id"):
+                return r
+        return None
+
+    def _climatiq_measure_factor(self, activity_id):
+        """Measure a factor's effective kg CO2e per USD with a $1M probe.
+
+        Returns (kg_per_usd, estimate_payload).  Uses the estimate endpoint
+        because the raw ``factor`` value in search results is a paid add-on.
+        """
+        resp = requests.post(
+            f"{self._climatiq_base}/data/v1/estimate",
+            headers={**self._climatiq_headers(), "Content-Type": "application/json"},
+            json={
+                "emission_factor": {
+                    "activity_id": activity_id,
+                    "data_version": "^21",
+                },
+                "parameters": {"money": 1_000_000, "money_unit": "usd"},
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        co2e = payload.get("co2e")
+        if co2e is None or co2e <= 0:
+            raise ValueError(f"no co2e in Climatiq estimate response: {payload!r:.200}")
+        return co2e / 1_000_000.0, payload
+
+    def get_sector_factor(self, sector):
+        """Resolve (and cache) the spend-based factor for a TradingView sector.
+
+        Returns ``{"factor_kg_per_usd", "activity_id", "factor_name"}``
+        or None when the sector cannot be resolved.
+        """
+        if not self._climatiq_key:
+            return None
+        sector = (sector or "").strip() or "Other"
+        if sector in self._sector_factors:
+            return self._sector_factors[sector]
+
+        queries = [
+            q
+            for q in (
+                CLIMATIQ_SECTOR_QUERIES.get(sector),
+                sector,  # raw sector name often matches too
+                CLIMATIQ_FALLBACK_QUERY,
+            )
+            if q
+        ]
+        for query in queries:
+            try:
+                factor = self._climatiq_search_factor(query)
+                if not factor:
+                    continue
+                kg_per_usd, _ = self._climatiq_measure_factor(factor["activity_id"])
+                entry = {
+                    "factor_kg_per_usd": kg_per_usd,
+                    "activity_id": factor["activity_id"],
+                    "factor_name": factor.get("name"),
+                }
+                self._sector_factors[sector] = entry
+                logger.info(
+                    "Climatiq factor for %r: %s (%s) = %.6g kg CO2e/USD",
+                    sector,
+                    entry["factor_name"],
+                    entry["activity_id"],
+                    kg_per_usd,
+                )
+                return entry
+            except (requests.RequestException, ValueError) as e:
+                logger.warning(
+                    "Climatiq factor resolution failed for %r (query %r): %s",
+                    sector,
+                    query,
+                    e,
+                )
+        self._sector_factors[sector] = None  # negative cache
+        return None
+
+    def estimate_company_emissions(self, sector, revenue):
+        """Estimate one company's emissions from sector factor × revenue.
+
+        Returns a CarbonEmission-schema dict, or None when the sector
+        factor is unavailable or revenue is missing/zero.
+        """
+        entry = self.get_sector_factor(sector)
+        if not entry:
+            return None
+        try:
+            revenue = float(revenue)
+        except (TypeError, ValueError):
+            return None
+        if revenue <= 0:
+            return None
+
+        factor = entry["factor_kg_per_usd"]
+        # kg CO2e → metric tons; intensity is tCO2e per $1M revenue
+        total_t = revenue * factor / 1000.0
+        intensity = factor * 1000.0
+        return {
+            "report_year": datetime.now().year,
+            "scope1": None,  # spend-based factors give a combined figure only
+            "scope2": None,
+            "total_emissions": round(total_t, 2),
+            "carbon_intensity_revenue": round(intensity, 4),
+            "carbon_change_yoy": None,
+            "revenue": round(revenue, 2),
+            "data_source": "climatiq",
+            "has_carbon_data": True,
+        }
+
+    def _fetch_climatiq(self, symbol):
+        """Estimate carbon data for one symbol using its DB sector+revenue."""
+        try:
+            from app.models.company import Company
+            from app.models.financial_metric import FinancialMetric
+
+            company = Company.query.filter_by(symbol=symbol).first()
+            if not company:
+                return None
+            fm = (
+                FinancialMetric.query.filter_by(symbol=symbol)
+                .order_by(FinancialMetric.date.desc())
+                .first()
+            )
+            revenue = float(fm.revenue) if fm and fm.revenue else None
+            if not revenue:
+                logger.info(
+                    "No revenue in DB for %s — Climatiq estimation skipped", symbol
+                )
+                return None
+            return self.estimate_company_emissions(company.sector, revenue)
+        except Exception as e:  # noqa: BLE001 — degrade to Bavest/DB
+            logger.error("Climatiq estimation failed for %s: %s", symbol, e)
+            return None
 
     # ------------------------------------------------------------------
     # Clarity AI provider

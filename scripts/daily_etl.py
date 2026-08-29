@@ -51,13 +51,14 @@ METRIC_MAP = {
     "turnover": "turnover",
     "change_1_year": "week_52_change",
     "net_margin": "net_profit_margin",
+    "total_revenue": "revenue",
 }
 
 TV_COLUMNS = [
     "name", "description", "type", "exchange", "sector", "industry",
     "close", "volume", "market_cap_basic", "price_earnings_ttm",
     "price_book_value", "dividend_yield_recent", "turnover",
-    "change_1_year", "net_margin",
+    "change_1_year", "net_margin", "total_revenue",
 ]
 
 
