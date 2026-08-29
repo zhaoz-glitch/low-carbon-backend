@@ -53,13 +53,13 @@ CLIMATIQ_SECTOR_QUERIES = {
     "Finance": "financial and insurance services",
     "Non-Energy Minerals": "mining and quarrying",
     "Health Technology": "pharmaceutical manufacturing",
-    "Technology Services": "computer programming and information services",
+    "Technology Services": "computer services",
     "Electronic Technology": "electronic equipment manufacturing",
     "Producer Manufacturing": "machinery and equipment manufacturing",
     "Commercial Services": "business support services",
     "Process Industries": "chemicals manufacturing",
     "Consumer Services": "hotels and restaurants services",
-    "Energy Minerals": "crude petroleum and natural gas extraction",
+    "Energy Minerals": "oil and gas extraction",
     "Consumer Non-Durables": "food and beverages manufacturing",
     "Industrial Services": "industrial and waste management services",
     "Retail Trade": "retail trade",
@@ -295,7 +295,7 @@ class CarbonService:
             params={
                 "query": query,
                 "unit_type": "Money",
-                "data_version": "^21",
+                "data_version": "^37",
                 "results_per_page": 10,
             },
             timeout=20,
@@ -322,7 +322,7 @@ class CarbonService:
             json={
                 "emission_factor": {
                     "activity_id": activity_id,
-                    "data_version": "^21",
+                    "data_version": "^37",
                 },
                 "parameters": {"money": 1_000_000, "money_unit": "usd"},
             },

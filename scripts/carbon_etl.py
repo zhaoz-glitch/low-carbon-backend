@@ -78,14 +78,14 @@ def run_etl(min_revenue: float = 0.0, dry_run: bool = False) -> dict:
     from app.models.carbon_emission import CarbonEmission
     from app.services.carbon_service import carbon_service
 
-    if not carbon_service._climatiq_key and not dry_run:
-        logger.error(
-            "CLIMATIQ_API_KEY is not set — add it to .env and re-run"
-        )
-        sys.exit(2)
-
     app = create_app()
     with app.app_context():
+        if not carbon_service._climatiq_key and not dry_run:
+            logger.error(
+                "CLIMATIQ_API_KEY is not set — add it to .env and re-run"
+            )
+            sys.exit(2)
+
         df = fetch_universe()
 
         # --- normalize ---
