@@ -85,6 +85,9 @@ class Config:
     CLARITY_AI_BASE_URL = os.environ.get(
         "CLARITY_AI_BASE_URL", "https://api.clarity.ai/clarity/v1"
     )
+    # Optional extra ticker→ISIN overrides as a JSON object string, e.g.
+    # '{"SPGI": "US78409V1020"}' — merged over the built-in static map.
+    ISIN_MAP_JSON = os.environ.get("ISIN_MAP_JSON", "")
 
     # Bavest (secondary carbon provider) & Intrinio (legacy)
     BAVEST_API_KEY = os.environ.get("BAVEST_API_KEY", "")

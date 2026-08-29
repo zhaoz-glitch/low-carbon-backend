@@ -12,11 +12,13 @@ MySQL (Railway production).  The previous implementation used SQLite-only
 
   * Table discovery:      inspector.get_table_names()         (DB-agnostic)
   * Column introspection: inspector.get_columns(table)        (DB-agnostic)
-  * Row counting:         SELECT COUNT(*) FROM <table>        (raw SQL)
-  * Data fetch:           SELECT * FROM <table> LIMIT ? …    (raw SQL)
+  * Row counting:         SELECT COUNT(*) FROM <table>        (raw SQL, quoted)
+  * Data fetch:           SELECT * FROM <table> LIMIT ? …    (raw SQL, quoted)
 
 Table names are validated against a whitelist derived from the SQLAlchemy
-metadata to prevent SQL injection.
+metadata to prevent SQL injection.  Identifier quoting is delegated to
+SQLAlchemy's dialect so the same f-string template works on SQLite (which
+accepts double-quotes) and MySQL 8 (which requires backticks).
 """
 
 import logging
@@ -47,6 +49,18 @@ def _safe_table(name):
     return None
 
 
+def _quote_table(name: str) -> str:
+    """Quote a (whitelisted) table name according to the active dialect.
+
+    SQLite happily accepts ``"name"`` (double-quoted) as an identifier.  MySQL 8
+    rejects that and requires backticks.  SQLAlchemy exposes the dialect's
+    preparer, so we use that — and it is also what protects us from injection
+    beyond the whitelist (the value is escaped if it contains quote characters).
+    """
+    preparer = db.engine.dialect.identifier_preparer
+    return preparer.quote_identifier(name)
+
+
 @db_bp.route("/db/tables", methods=["GET"])
 @login_required
 def list_tables():
@@ -55,7 +69,9 @@ def list_tables():
     Works on both SQLite and MySQL — column introspection goes through the
     SQLAlchemy ``Inspector`` which translates each dialect's native metadata
     (sqlite_master on SQLite, information_schema on MySQL) into a uniform
-    Python API.  Row counts are still raw ``COUNT(*)`` queries.
+    Python API.  Row counts are still raw ``COUNT(*)`` queries, but the table
+    identifier is quoted by SQLAlchemy's dialect preparer so the same code
+    works on both engines.
     """
     inspector = inspect(db.engine)
     table_names = sorted(
@@ -78,8 +94,9 @@ def list_tables():
             })
 
         # --- SQL task: raw COUNT(*) for live row counts ---
+        quoted = _quote_table(tname)
         row_count = db.session.execute(
-            text(f'SELECT COUNT(*) FROM "{tname}"')
+            text(f"SELECT COUNT(*) FROM {quoted}")
         ).scalar()
 
         tables.append({
@@ -114,14 +131,16 @@ def get_table_data(table_name):
     col_info = inspector.get_columns(tname)
     col_names = [c["name"] for c in col_info]
 
+    quoted = _quote_table(tname)
+
     # --- SQL task: raw total count ---
     total = db.session.execute(
-        text(f'SELECT COUNT(*) FROM "{tname}"')
+        text(f"SELECT COUNT(*) FROM {quoted}")
     ).scalar()
 
     # --- SQL task: raw paginated data fetch ---
     rows_result = db.session.execute(
-        text(f'SELECT * FROM "{tname}" LIMIT :limit OFFSET :offset'),
+        text(f"SELECT * FROM {quoted} LIMIT :limit OFFSET :offset"),
         {"limit": limit, "offset": offset},
     )
     rows = []

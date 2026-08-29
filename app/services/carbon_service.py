@@ -38,6 +38,43 @@ CLARITY_METRICS = [
 JOB_POLL_INTERVAL = 2  # seconds
 JOB_POLL_TIMEOUT = 120  # seconds
 
+# Ticker → ISIN mapping for the companies seeded by mock_data plus a few
+# common aliases.  US ISINs are public identifiers ("US" + 9-char CUSIP +
+# check digit).  Extend via the ISIN_MAP_JSON env var (see init_app) or by
+# adding entries here.
+TICKER_ISIN_MAP = {
+    "AAPL": "US0378331005",   # Apple Inc.
+    "MSFT": "US5949181045",   # Microsoft Corporation
+    "GOOGL": "US02079K3059",  # Alphabet Inc. Class A
+    "GOOG": "US02079K1079",   # Alphabet Inc. Class C
+    "AMZN": "US0231351067",   # Amazon.com Inc.
+    "NVDA": "US67066G1040",   # NVIDIA Corporation
+    "META": "US30303M1027",   # Meta Platforms Inc. Class A
+    "TSLA": "US88160R1014",   # Tesla Inc.
+    "JPM": "US46625H1005",    # JPMorgan Chase & Co.
+    "V": "US92826C8394",      # Visa Inc. Class A
+    "JNJ": "US4781601046",    # Johnson & Johnson
+    "WMT": "US9311421039",    # Walmart Inc.
+    "XOM": "US30231G1022",    # Exxon Mobil Corporation
+    "PG": "US7427181091",     # Procter & Gamble Co.
+    "KO": "US1912161007",     # Coca-Cola Co.
+    "HD": "US4385161066",     # Home Depot Inc.
+    "AVGO": "US1113951063",   # Broadcom Inc.
+    "MA": "US57636Q1040",     # Mastercard Inc. Class A
+    "UNH": "US91324P1021",    # UnitedHealth Group Inc.
+    "NEE": "US65339F1012",    # NextEra Energy Inc.
+    "CVX": "US1667649720",    # Chevron Corporation
+    "BRK.B": "US12142K1002",  # Berkshire Hathaway Inc. Class B
+    "PEP": "US7134481081",    # PepsiCo Inc.
+    "DIS": "US2546871060",    # The Walt Disney Company
+    "INTC": "US4581401001",   # Intel Corporation
+    "AMD": "US0079031078",    # Advanced Micro Devices
+    "CSCO": "US1729674242",   # Cisco Systems Inc.
+    "ORCL": "US68389X1054",   # Oracle Corporation
+    "BA": "US0970231058",     # The Boeing Company
+    "GE": "US3696043013",     # GE Aerospace
+}
+
 
 class CarbonService:
     """Fetch and manage carbon emission data (Clarity AI → Bavest → DB)."""
@@ -50,6 +87,9 @@ class CarbonService:
         self._clarity_timeout = 20
         self._token = None
         self._token_expiry = 0.0
+
+        # Ticker → ISIN lookup (static map + env-provided overrides)
+        self._isin_map = dict(TICKER_ISIN_MAP)
 
         # Legacy/secondary provider
         self._bavest_key = ""
@@ -66,6 +106,16 @@ class CarbonService:
         self._bavest_base = app.config.get(
             "BAVEST_BASE_URL", "https://api.bavest.co"
         )
+        # Optional extra ticker→ISIN overrides, supplied as a JSON object:
+        #   ISIN_MAP_JSON='{"BRK.B": "US12142K1002", "SPGI": "US78409V1020"}'
+        import json
+
+        overrides = app.config.get("ISIN_MAP_JSON", "")
+        if overrides:
+            try:
+                self._isin_map.update(json.loads(overrides))
+            except (ValueError, TypeError) as e:
+                logger.warning("Invalid ISIN_MAP_JSON ignored: %s", e)
 
     # ------------------------------------------------------------------
     # Public API
@@ -299,15 +349,16 @@ class CarbonService:
             "has_carbon_data": True,
         }
 
-    @staticmethod
-    def _symbol_to_isin(symbol):
-        """Map a US ticker to an ISIN (CUSIP-based heuristic).
+    def _symbol_to_isin(self, symbol):
+        """Map a US ticker to an ISIN.
 
-        Clarity AI's synchronous securities endpoints also accept ticker-like
-        IDs; if you maintain a real ticker→ISIN table, plug it in here.
+        Lookup order: env-provided overrides (merged in ``init_app``) →
+        built-in static map.  Returns None for unknown tickers, which makes
+        the Clarity AI fetch skip that symbol (Bavest/DB fallback applies).
         """
-        # TODO: replace with a proper ticker→ISIN lookup table
-        return None
+        if not symbol:
+            return None
+        return self._isin_map.get(symbol.strip().upper())
 
     # ------------------------------------------------------------------
     # Bavest provider (secondary)
