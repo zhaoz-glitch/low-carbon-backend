@@ -8,8 +8,8 @@ required).  Field names map 1:1 to TradingView screener columns:
     ----------------------------------------------------
     market_cap_basic          → market_cap
     price_earnings_ttm        → pe_ttm
-    price_book_value          → pb
-    dividend_yield_recent     → dividend_yield
+    price_book_fq             → pb
+    dividends_yield           → dividend_yield
     turnover                  → turnover
     change_1_year             → week_52_change
     net_margin                → net_profit_margin
@@ -18,6 +18,10 @@ required).  Field names map 1:1 to TradingView screener columns:
 The service is best-effort: any failure (package missing, network error,
 TradingView unreachable) falls back to ``None`` so the caller transparently
 uses the local database (seeded by ``mock_data.py``).
+
+Note: TradingView renamed scanner fields in 2026 — ``price_book_value`` →
+``price_book_fq`` and ``dividend_yield_recent`` → ``dividends_yield``.
+The old names now return null, so only the new names are used below.
 
 Docs: https://github.com/shner-elmo/TradingView-Screener
 """
@@ -34,8 +38,8 @@ TV_COLUMNS = [
     "volume",
     "market_cap_basic",
     "price_earnings_ttm",
-    "price_book_value",
-    "dividend_yield_recent",
+    "price_book_fq",
+    "dividends_yield",
     "turnover",
     "change_1_year",
     "net_margin",
@@ -46,11 +50,18 @@ TV_COLUMNS = [
 COLUMN_MAP = {
     "market_cap_basic": "market_cap",
     "price_earnings_ttm": "pe_ttm",
-    "price_book_value": "pb",
-    "dividend_yield_recent": "dividend_yield",
+    "price_book_fq": "pb",
+    "dividends_yield": "dividend_yield",
     "change_1_year": "week_52_change",
     "net_margin": "net_profit_margin",
     "total_revenue": "revenue",
+}
+
+# Legacy frontend/API filter keys → current TradingView scanner columns.
+# TradingView renamed the underlying fields; keep old keys working.
+TV_FIELD_ALIASES = {
+    "price_book_value": "price_book_fq",
+    "dividend_yield_recent": "dividends_yield",
 }
 
 
@@ -271,6 +282,9 @@ class TradingViewService:
             # filters: {column: (op, value)} with op in {>, <, >=, <=}
             import operator
 
+            # Legacy frontend keys → current TradingView column names
+            tv_field = TV_FIELD_ALIASES.get
+
             ops = {
                 ">": operator.gt,
                 "<": operator.lt,
@@ -278,7 +292,7 @@ class TradingViewService:
                 "<=": operator.le,
             }
             exprs = [
-                ops[op](col(column), value)
+                ops[op](col(tv_field(column, column)), value)
                 for column, (op, value) in filters.items()
                 if op in ops
             ]

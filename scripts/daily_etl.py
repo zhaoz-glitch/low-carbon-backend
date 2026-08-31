@@ -46,8 +46,8 @@ METRIC_MAP = {
     "volume": "volume",
     "market_cap_basic": "market_cap",
     "price_earnings_ttm": "pe_ttm",
-    "price_book_value": "pb",
-    "dividend_yield_recent": "dividend_yield",
+    "price_book_fq": "pb",
+    "dividends_yield": "dividend_yield",
     "turnover": "turnover",
     "change_1_year": "week_52_change",
     "net_margin": "net_profit_margin",
@@ -57,7 +57,7 @@ METRIC_MAP = {
 TV_COLUMNS = [
     "name", "description", "type", "exchange", "sector", "industry",
     "close", "volume", "market_cap_basic", "price_earnings_ttm",
-    "price_book_value", "dividend_yield_recent", "turnover",
+    "price_book_fq", "dividends_yield", "turnover",
     "change_1_year", "net_margin", "total_revenue",
 ]
 

@@ -36,8 +36,8 @@ COLUMNS = [
     "volume",
     "market_cap_basic",
     "price_earnings_ttm",
-    "price_book_value",
-    "dividend_yield_recent",
+    "price_book_fq",
+    "dividends_yield",
     "turnover",
     "net_margin",
 ]
