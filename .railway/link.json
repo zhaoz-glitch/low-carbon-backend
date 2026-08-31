@@ -1,0 +1,9 @@
+{
+  "name": "zoological-education",
+  "projectId": "757766a4-4b2d-4bc9-a0b1-a52111ef2cf4",
+  "environmentId": "7a4f99e2-6f0f-4408-82e6-f779844eed8b",
+  "environmentName": "production",
+  "serviceId": "ad0b25a3-586e-4c2d-a911-fd9e996ebeb1",
+  "serviceName": "low-carbon-backend",
+  "root": ""
+}

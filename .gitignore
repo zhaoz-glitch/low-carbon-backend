@@ -43,5 +43,6 @@ htmlcov/
 
 # Logs
 *.log
-.railway/
+.railway/*
+!.railway/link.json
 exports/
