@@ -29,11 +29,13 @@ def create_app(config_class=None):
     from app.routes.stock import stock_bp
     from app.routes.auth import auth_bp
     from app.routes.db_admin import db_bp
+    from app.routes.admin import admin_bp
 
     app.register_blueprint(screener_bp, url_prefix="/api")
     app.register_blueprint(stock_bp, url_prefix="/api")
     app.register_blueprint(auth_bp, url_prefix="/api")
     app.register_blueprint(db_bp, url_prefix="/api")
+    app.register_blueprint(admin_bp, url_prefix="/api")
 
     # Health check
     @app.route("/health")

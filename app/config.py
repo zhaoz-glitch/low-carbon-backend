@@ -101,6 +101,10 @@ class Config:
     BAVEST_BASE_URL = os.environ.get("BAVEST_BASE_URL", "https://api.bavest.co")
     INTRINIO_API_KEY = os.environ.get("INTRINIO_API_KEY", "")
 
+    # Admin token — required by /api/admin/* endpoints.  Pick a long random
+    # string and set the same value on the cron service / curl caller.
+    ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+
     # Pagination
     DEFAULT_PAGE_SIZE = int(os.environ.get("DEFAULT_PAGE_SIZE", 50))
     MAX_PAGE_SIZE = int(os.environ.get("MAX_PAGE_SIZE", 200))
