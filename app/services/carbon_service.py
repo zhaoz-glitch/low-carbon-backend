@@ -194,13 +194,33 @@ class CarbonService:
             )
         return result
 
+    def is_configured(self):
+        """Return True when at least one carbon provider has credentials."""
+        return bool(
+            (self._clarity_key and self._clarity_secret)
+            or self._climatiq_key
+            or self._bavest_key
+        )
+
+    def fetch_universe_carbon(self, symbols=None) -> list[dict] | None:
+        """Pull carbon metrics for the screener universe via configured providers.
+
+        Tries Clarity AI (reported), then Climatiq (spend-based estimate),
+        then Bavest for each symbol.  Returns a list of carbon row dicts
+        (each with ``symbol`` set), or None when nothing could be fetched.
+        """
+        results = []
+        for symbol in (symbols or universe_symbols()):
+            row = self.fetch_carbon_data(symbol)
+            if row:
+                row.setdefault("symbol", symbol)
+                results.append(row)
+        return results or None
+
     def fetch_and_store(self, symbol, db=None):
         """Fetch carbon data and upsert into the database.
 
-    def fetch_universe_carbon(self, symbols=None) -> list[dict] | None:
-        """Pull SFDR carbon metrics for the screener universe.
-
-        Returns a list of carbon row dicts, or None if not configured / failed.
+        Returns True on success, False on failure.
         """
         if db is None and self.app is not None:
             from app.extensions import db as _db
