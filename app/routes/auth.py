@@ -16,7 +16,6 @@ from datetime import timedelta
 from flask import Blueprint, current_app, request, jsonify
 
 from app.extensions import db
-from app.models.password_reset import PasswordResetCode
 from app.models.user import User
 from app.models.password_reset_code import PasswordResetCode, utcnow
 from app.services.mail import send_password_reset_code
