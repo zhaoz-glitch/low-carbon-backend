@@ -46,3 +46,4 @@ htmlcov/
 .railway/*
 !.railway/link.json
 exports/
+.workbuddy/

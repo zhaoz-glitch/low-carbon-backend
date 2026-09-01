@@ -63,6 +63,7 @@ def create_app(config_class=None):
             carbon_emission,
             preset_template,
             user,
+            password_reset_code,
         )  # noqa: F401
 
         # Log which database we are actually talking to

@@ -105,6 +105,22 @@ class Config:
     # string and set the same value on the cron service / curl caller.
     ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 
+    # Email — used by password reset.  Two transports:
+    #   1. RESEND_API_KEY (preferred) — Resend REST API, no SMTP needed.
+    #      MAIL_FROM defaults to Resend's shared sender "onboarding@resend.dev"
+    #      which can ONLY deliver to the Resend account owner's own address;
+    #      verify a custom domain in Resend to send to arbitrary users.
+    #   2. SMTP (fallback) — see MAIL_SMTP_* below.
+    # When neither is configured, emails are logged to the server console
+    # instead of being sent (dev mode).
+    RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+    MAIL_SMTP_HOST = os.environ.get("MAIL_SMTP_HOST", "")
+    MAIL_SMTP_PORT = os.environ.get("MAIL_SMTP_PORT", "465")
+    MAIL_SMTP_USER = os.environ.get("MAIL_SMTP_USER", "")
+    MAIL_SMTP_PASSWORD = os.environ.get("MAIL_SMTP_PASSWORD", "")
+    MAIL_FROM = os.environ.get("MAIL_FROM", "")
+    MAIL_FROM_NAME = os.environ.get("MAIL_FROM_NAME", "低碳价值筛选器")
+
     # Pagination
     DEFAULT_PAGE_SIZE = int(os.environ.get("DEFAULT_PAGE_SIZE", 50))
     MAX_PAGE_SIZE = int(os.environ.get("MAX_PAGE_SIZE", 200))
