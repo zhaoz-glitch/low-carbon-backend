@@ -4,22 +4,27 @@ Endpoints (all require login):
   GET /api/db/tables                — list every table with columns & row counts
   GET /api/db/tables/<table_name>   — paginated rows of a single table
 
-Both endpoints are implemented with **raw SQL** via ``db.session.execute(text(...))``
-to fulfil the "SQL query task" requirement:
+Both endpoints use **raw SQL** via ``db.session.execute(text(...))`` to fulfil
+the "SQL query task" requirement, while the table-discovery leg now relies on
+``sqlalchemy.inspect`` so the same code works against SQLite (local dev) and
+MySQL (Railway production).  The previous implementation used SQLite-only
+``sqlite_master`` / ``PRAGMA table_info`` and would have crashed on MySQL.
 
-  * Table discovery:     SELECT name FROM sqlite_master WHERE type='table'
-  * Column introspection: PRAGMA table_info(<table>)
-  * Row counting:         SELECT COUNT(*) FROM <table>
-  * Data fetch:           SELECT * FROM <table> LIMIT ? OFFSET ?
+  * Table discovery:      inspector.get_table_names()         (DB-agnostic)
+  * Column introspection: inspector.get_columns(table)        (DB-agnostic)
+  * Row counting:         SELECT COUNT(*) FROM <table>        (raw SQL, quoted)
+  * Data fetch:           SELECT * FROM <table> LIMIT ? …    (raw SQL, quoted)
 
 Table names are validated against a whitelist derived from the SQLAlchemy
-metadata to prevent SQL injection.
+metadata to prevent SQL injection.  Identifier quoting is delegated to
+SQLAlchemy's dialect so the same f-string template works on SQLite (which
+accepts double-quotes) and MySQL 8 (which requires backticks).
 """
 
 import logging
 
 from flask import Blueprint, jsonify, request
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 from app.extensions import db
 from app.utils.auth import login_required
@@ -27,6 +32,9 @@ from app.utils.auth import login_required
 logger = logging.getLogger(__name__)
 
 db_bp = Blueprint("db_admin", __name__)
+
+
+SENSITIVE_COLUMNS = {"password_hash"}
 
 
 def _allowed_tables():
@@ -41,38 +49,55 @@ def _safe_table(name):
     return None
 
 
+def _quote_table(name: str) -> str:
+    """Quote a (whitelisted) table name according to the active dialect.
+
+    SQLite happily accepts ``"name"`` (double-quoted) as an identifier.  MySQL 8
+    rejects that and requires backticks.  SQLAlchemy exposes the dialect's
+    preparer, so we use that — and it is also what protects us from injection
+    beyond the whitelist (the value is escaped if it contains quote characters).
+    """
+    preparer = db.engine.dialect.identifier_preparer
+    return preparer.quote_identifier(name)
+
+
 @db_bp.route("/db/tables", methods=["GET"])
 @login_required
 def list_tables():
     """List all tables with their column definitions and row counts.
 
-    Uses raw SQL against sqlite_master / PRAGMA table_info.
-    Sensitive columns (password_hash) are masked in the response.
+    Works on both SQLite and MySQL — column introspection goes through the
+    SQLAlchemy ``Inspector`` which translates each dialect's native metadata
+    (sqlite_master on SQLite, information_schema on MySQL) into a uniform
+    Python API.  Row counts are still raw ``COUNT(*)`` queries, but the table
+    identifier is quoted by SQLAlchemy's dialect preparer so the same code
+    works on both engines.
     """
-    # --- SQL task 1: discover tables via sqlite_master ---
-    tables_result = db.session.execute(
-        text("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+    inspector = inspect(db.engine)
+    table_names = sorted(
+        name for name in inspector.get_table_names()
+        if name in _allowed_tables()
     )
-    table_names = [row[0] for row in tables_result]
 
     tables = []
     for tname in table_names:
-        # --- SQL task 2: column introspection via PRAGMA ---
-        cols_result = db.session.execute(text(f'PRAGMA table_info("{tname}")'))
+        # --- SQL task: column introspection (DB-agnostic via Inspector) ---
         columns = []
-        for cid, name, ctype, notnull, dflt, pk in cols_result:
+        for col in inspector.get_columns(tname):
+            # ``col`` is an OrderedDict-like; pull the keys we care about.
             columns.append({
-                "cid": cid,
-                "name": name,
-                "type": ctype,
-                "notnull": bool(notnull),
-                "default": dflt,
-                "pk": bool(pk),
+                "name": col.get("name"),
+                "type": str(col.get("type")),
+                "nullable": bool(col.get("nullable", True)),
+                "default": str(col.get("default")) if col.get("default") is not None else None,
+                "pk": bool(col.get("primary_key", False)),
             })
 
-        # --- SQL task 3: row count ---
-        count_result = db.session.execute(text(f'SELECT COUNT(*) FROM "{tname}"'))
-        row_count = count_result.scalar()
+        # --- SQL task: raw COUNT(*) for live row counts ---
+        quoted = _quote_table(tname)
+        row_count = db.session.execute(
+            text(f"SELECT COUNT(*) FROM {quoted}")
+        ).scalar()
 
         tables.append({
             "name": tname,
@@ -102,25 +127,29 @@ def get_table_data(table_name):
     except ValueError:
         return jsonify({"error": "limit/offset must be integers"}), 400
 
-    # --- SQL task 4: column metadata for display order ---
-    cols_result = db.session.execute(text(f'PRAGMA table_info("{tname}")'))
-    col_names = [row[1] for row in cols_result]
+    inspector = inspect(db.engine)
+    col_info = inspector.get_columns(tname)
+    col_names = [c["name"] for c in col_info]
 
-    # --- SQL task 5: total row count ---
-    total = db.session.execute(text(f'SELECT COUNT(*) FROM "{tname}"')).scalar()
+    quoted = _quote_table(tname)
 
-    # --- SQL task 6: paginated data fetch ---
+    # --- SQL task: raw total count ---
+    total = db.session.execute(
+        text(f"SELECT COUNT(*) FROM {quoted}")
+    ).scalar()
+
+    # --- SQL task: raw paginated data fetch ---
     rows_result = db.session.execute(
-        text(f'SELECT * FROM "{tname}" LIMIT :limit OFFSET :offset'),
+        text(f"SELECT * FROM {quoted} LIMIT :limit OFFSET :offset"),
         {"limit": limit, "offset": offset},
     )
     rows = []
+    sensitive = SENSITIVE_COLUMNS.intersection(col_names)
     for row in rows_result:
         record = {}
         for key in row._mapping.keys():
             value = row._mapping[key]
-            # Never expose password hashes, even in the workbench
-            if key == "password_hash":
+            if key in sensitive:
                 value = "********"
             record[key] = str(value) if value is not None else None
         rows.append(record)

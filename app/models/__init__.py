@@ -5,8 +5,7 @@ from app.models.financial_metric import FinancialMetric
 from app.models.carbon_emission import CarbonEmission
 from app.models.preset_template import PresetTemplate
 from app.models.user import User
-from app.models.data_sync_log import DataSyncLog
-from app.models.password_reset import PasswordResetCode
+from app.models.password_reset_code import PasswordResetCode
 
 __all__ = [
     "Company",
@@ -14,6 +13,5 @@ __all__ = [
     "CarbonEmission",
     "PresetTemplate",
     "User",
-    "DataSyncLog",
     "PasswordResetCode",
 ]

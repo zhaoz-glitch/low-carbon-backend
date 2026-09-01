@@ -14,7 +14,7 @@ venv/
 env/
 
 .env
-.env.local
+.env.*
 !.env.example
 
 # Database
@@ -42,4 +42,7 @@ htmlcov/
 
 # Logs
 *.log
-.railway/
+.railway/*
+!.railway/link.json
+exports/
+.workbuddy/

@@ -4,25 +4,23 @@ Endpoints:
   POST /api/auth/register — create a new account → token + user
   POST /api/auth/login    — email + password → token
   GET  /api/auth/me       — current user info (requires token in Authorization header)
-  POST /api/auth/forgot-password — email a 6-digit reset code
-  POST /api/auth/verify-reset-code
-  POST /api/auth/reset-password
+  POST /api/auth/forgot-password — email → send 6-digit reset code
+  POST /api/auth/reset-password  — email + code + new password → reset
 """
 
 import re
+import secrets
 import logging
+from datetime import timedelta
 
 from flask import Blueprint, current_app, request, jsonify
 
 from app.extensions import db
 from app.models.password_reset import PasswordResetCode
 from app.models.user import User
-from app.services.email_service import (
-    email_configured,
-    generate_reset_code,
-    send_reset_email,
-)
-from app.utils.auth import generate_token, login_required, current_user
+from app.models.password_reset_code import PasswordResetCode, utcnow
+from app.services.mail import send_password_reset_code
+from app.utils.auth import generate_token, verify_token, login_required, current_user
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +30,11 @@ auth_bp = Blueprint("auth", __name__)
 # full validation library.  The UNIQUE constraint on the column is the
 # real safety net against duplicates.
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+# Reset codes expire after this long and are single-use.
+_CODE_TTL = timedelta(minutes=15)
+# Anti-spam: one code per email per window.
+_RESEND_WINDOW = timedelta(seconds=60)
 
 
 @auth_bp.route("/auth/register", methods=["POST"])
@@ -130,80 +133,104 @@ def get_me():
     return jsonify({"user": user.to_dict()})
 
 
-_GENERIC_RESET_MSG = "If that email is registered, a code has been sent"
+def _generate_code() -> str:
+    """6-digit numeric code (100000–999999)."""
+    return f"{secrets.randbelow(1_000_000):06d}"
 
 
 @auth_bp.route("/auth/forgot-password", methods=["POST"])
 def forgot_password():
-    """Email a 6-digit code. Same success copy whether the account exists."""
+    """Send a 6-digit reset code to the user's email.
+
+    Request body::
+
+        {"email": "user@example.com"}
+
+    Always returns 200 for a well-formed request even when the account does
+    not exist, so callers can't enumerate registered emails.  A 429 is
+    returned if a code was already issued within the last 60 seconds.
+    """
     data = request.get_json(silent=True) or {}
     email = (data.get("email") or "").strip().lower()
 
     if not email or not _EMAIL_RE.match(email):
-        return jsonify({"error": "Enter a valid email address"}), 400
+        return jsonify({"error": "请输入有效的邮箱地址"}), 400
 
     user = User.query.filter_by(email=email).first()
+
+    # Rate limit regardless of account existence (cheap anti-spam).
+    recent = (
+        PasswordResetCode.query.filter_by(email=email)
+        .order_by(PasswordResetCode.id.desc())
+        .first()
+    )
+    if recent and recent.created_at and utcnow() - recent.created_at < _RESEND_WINDOW:
+        return jsonify({"error": "发送太频繁，请 60 秒后再试"}), 429
+
     if user is None:
-        return jsonify({"message": _GENERIC_RESET_MSG})
+        # Identical response — don't reveal whether the email is registered.
+        logger.info("Forgot-password request for unknown email %s", email)
+        return jsonify({"message": "如果该邮箱已注册，验证码已发送到你的邮箱"}), 200
 
-    code = generate_reset_code()
-    PasswordResetCode.issue(email, code)
+    # Invalidate any previously issued codes for this account, then issue one.
+    PasswordResetCode.query.filter_by(email=email).update({"used": True})
+    code = _generate_code()
+    db.session.add(
+        PasswordResetCode(
+            email=email,
+            code=code,
+            expires_at=utcnow() + _CODE_TTL,
+        )
+    )
+    db.session.commit()
 
-    sent = send_reset_email(email, code, user.name)
-    payload = {"message": _GENERIC_RESET_MSG}
-
-    if not sent:
-        if email_configured():
-            return jsonify({"error": "Failed to send the code. Please try again."}), 502
-        payload["message"] = "Email is not configured. Use the returned code to finish reset."
-
-    # Classroom / local: expose the code when mail is not configured or DEBUG.
-    if current_app.debug or not email_configured():
-        payload["dev_code"] = code
-
-    return jsonify(payload)
-
-
-@auth_bp.route("/auth/verify-reset-code", methods=["POST"])
-def verify_reset_code():
-    data = request.get_json(silent=True) or {}
-    email = (data.get("email") or "").strip().lower()
-    code = (data.get("code") or "").strip()
-
-    if not email or not code:
-        return jsonify({"error": "Enter email and code"}), 400
-
-    if PasswordResetCode.find_valid(email, code) is None:
-        return jsonify({"error": "Invalid or expired code"}), 400
-
-    return jsonify({"message": "Code verified"})
+    send_password_reset_code(email, code)
+    logger.info("Password reset code issued for %s", email)
+    return jsonify({"message": "验证码已发送到你的邮箱"}), 200
 
 
 @auth_bp.route("/auth/reset-password", methods=["POST"])
 def reset_password():
+    """Redeem a reset code and set a new password.
+
+    Request body::
+
+        {"email": "user@example.com", "code": "123456", "password": "new-secret"}
+
+    The code is single-use: redeeming it invalidates every outstanding code
+    for the account, and after success the user logs in with the new
+    password.
+    """
     data = request.get_json(silent=True) or {}
     email = (data.get("email") or "").strip().lower()
     code = (data.get("code") or "").strip()
-    new_password = data.get("new_password") or data.get("newPassword") or ""
+    password = data.get("password") or ""
 
-    if not email or not code or not new_password:
-        return jsonify({"error": "Email, code, and new password are required"}), 400
-    if len(new_password) < 6:
-        return jsonify({"error": "Password must be at least 6 characters"}), 400
-    if len(new_password) > 128:
-        return jsonify({"error": "Password must be 128 characters or fewer"}), 400
-
-    row = PasswordResetCode.find_valid(email, code)
-    if row is None:
-        return jsonify({"error": "Invalid or expired code"}), 400
+    if not email or not _EMAIL_RE.match(email):
+        return jsonify({"error": "请输入有效的邮箱地址"}), 400
+    if not code:
+        return jsonify({"error": "请输入验证码"}), 400
+    if len(password) < 6:
+        return jsonify({"error": "密码至少 6 位"}), 400
+    if len(password) > 128:
+        return jsonify({"error": "密码不能超过 128 个字符"}), 400
 
     user = User.query.filter_by(email=email).first()
     if user is None:
-        return jsonify({"error": "Account not found"}), 404
+        return jsonify({"error": "验证码无效或已过期"}), 400
 
-    user.set_password(new_password)
-    row.used = True
+    record = (
+        PasswordResetCode.query.filter_by(email=email, code=code, used=False)
+        .order_by(PasswordResetCode.id.desc())
+        .first()
+    )
+    if record is None or record.is_expired():
+        return jsonify({"error": "验证码无效或已过期"}), 400
+
+    # Single-use: burn every outstanding code for the account.
+    PasswordResetCode.query.filter_by(email=email).update({"used": True})
+    user.set_password(password)
     db.session.commit()
 
-    logger.info("Password reset for %s", email)
-    return jsonify({"message": "Password updated. Sign in with your new password."})
+    logger.info("Password reset completed for %s", email)
+    return jsonify({"message": "密码已重置，请使用新密码登录"}), 200

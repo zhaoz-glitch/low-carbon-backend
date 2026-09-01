@@ -1,13 +1,27 @@
 """Carbon emission data service — Clarity AI SFDR REST (official API only).
 
-Flow (see https://developer.clarity.ai/docs/sfdr):
-  1. POST /oauth/token  with client key + secret  → Bearer (~60 min)
-  2. POST /public/securities/sfdr/metric-by-id/async  with ISINs + metricIds
-  3. Poll GET /public/job/{jobId}/status
-  4. GET  /public/job/{jobId}/download  → CSV/JSON
+Providers (in priority order):
 
-Without credentials the screener keeps the seeded mock carbon rows.
-We do not scrape Clarity (or any other) HTML pages.
+1. **Climatiq** (https://www.climatiq.io) — spend-based estimation.
+   Climatiq is an emission-factor engine, not a company disclosure DB:
+   for each TradingView sector we resolve a Money-unit (per-USD) emission
+   factor via ``GET /data/v1/search?unit_type=Money`` and measure its
+   effective kg-CO2e-per-USD with a single ``POST /data/v1/estimate``
+   call ($1M probe).  Company emissions are then computed locally as
+   ``factor × revenue`` — so a full-market backfill costs only one
+   search + one estimate per sector (~2 dozen API calls total).
+
+2. **Clarity AI** (https://developer.clarity.ai) — reported (disclosure)
+   data via OAuth token + SFDR async endpoints.  Used when credentials
+   are configured; takes precedence over estimates because reported
+   Scope 1/2 beats modelled values.
+
+3. **Bavest** — legacy secondary provider.
+
+4. Local database fallback (mock/seeded data) so the app always works.
+
+Auth: Climatiq uses ``Authorization: Bearer <api key>`` on
+``https://api.climatiq.io`` — see CLIMATIQ_API_KEY in the config.
 """
 
 from __future__ import annotations
@@ -16,7 +30,7 @@ import csv
 import io
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 
 import requests
 from flask import current_app
@@ -25,284 +39,196 @@ from app.universe import COMPANY_ISINS, isin_to_symbol, universe_symbols
 
 logger = logging.getLogger(__name__)
 
-SFDR_METRICS = [
-    "CARBON_EMISSIONS_SCOPE1",
-    "CARBON_EMISSIONS_SCOPE2",
-    "CARBON_EMISSIONS",
-    "GHG_INTENSITY",
+# Clarity AI SFDR metric IDs relevant to this screener
+CLARITY_METRICS = [
+    "CARBON_EMISSIONS",           # Scope 1+2 total (tCO2e)
+    "CARBON_EMISSIONS_SCOPE1",    # direct emissions
+    "CARBON_EMISSIONS_SCOPE2",    # purchased energy emissions
+    "GHG_INTENSITY",              # carbon intensity
 ]
 
+# Job polling defaults
+JOB_POLL_INTERVAL = 2  # seconds
+JOB_POLL_TIMEOUT = 120  # seconds
 
-def _num(value):
-    if value is None or value == "":
-        return None
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    if number != number:
-        return None
-    return number
+# Climatiq: TradingView sector (US market classification) → search query used
+# to find a Money-unit (spend-based, kg CO2e per USD) emission factor.
+# Queries are matched fuzzily by Climatiq's search endpoint; the fallback
+# tries the raw sector name and finally a generic services term.
+CLIMATIQ_SECTOR_QUERIES = {
+    # sector names as returned by the TradingView scanner (US classification)
+    "Finance": "financial and insurance services",
+    "Non-Energy Minerals": "mining and quarrying",
+    "Health Technology": "pharmaceutical manufacturing",
+    "Technology Services": "computer services",
+    "Electronic Technology": "electronic equipment manufacturing",
+    "Producer Manufacturing": "machinery and equipment manufacturing",
+    "Commercial Services": "business support services",
+    "Process Industries": "chemicals manufacturing",
+    "Consumer Services": "hotels and restaurants services",
+    "Energy Minerals": "oil and gas extraction",
+    "Consumer Non-Durables": "food and beverages manufacturing",
+    "Industrial Services": "industrial and waste management services",
+    "Retail Trade": "retail trade",
+    "Consumer Durables": "motor vehicles and equipment manufacturing",
+    "Utilities": "electricity and gas supply",
+    "Transportation": "transport services",
+    "Distribution Services": "wholesale trade",
+    "Health Services": "hospital and healthcare services",
+    "Communications": "telecommunications",
+    "Government": "public administration and defence",
+    "Miscellaneous": "other services",
+}
+CLIMATIQ_FALLBACK_QUERY = "services"
+
+# Ticker → ISIN mapping for the companies seeded by mock_data plus a few
+# common aliases.  US ISINs are public identifiers ("US" + 9-char CUSIP +
+# check digit).  Extend via the ISIN_MAP_JSON env var (see init_app) or by
+# adding entries here.
+TICKER_ISIN_MAP = {
+    "AAPL": "US0378331005",   # Apple Inc.
+    "MSFT": "US5949181045",   # Microsoft Corporation
+    "GOOGL": "US02079K3059",  # Alphabet Inc. Class A
+    "GOOG": "US02079K1079",   # Alphabet Inc. Class C
+    "AMZN": "US0231351067",   # Amazon.com Inc.
+    "NVDA": "US67066G1040",   # NVIDIA Corporation
+    "META": "US30303M1027",   # Meta Platforms Inc. Class A
+    "TSLA": "US88160R1014",   # Tesla Inc.
+    "JPM": "US46625H1005",    # JPMorgan Chase & Co.
+    "V": "US92826C8394",      # Visa Inc. Class A
+    "JNJ": "US4781601046",    # Johnson & Johnson
+    "WMT": "US9311421039",    # Walmart Inc.
+    "XOM": "US30231G1022",    # Exxon Mobil Corporation
+    "PG": "US7427181091",     # Procter & Gamble Co.
+    "KO": "US1912161007",     # Coca-Cola Co.
+    "HD": "US4385161066",     # Home Depot Inc.
+    "AVGO": "US1113951063",   # Broadcom Inc.
+    "MA": "US57636Q1040",     # Mastercard Inc. Class A
+    "UNH": "US91324P1021",    # UnitedHealth Group Inc.
+    "NEE": "US65339F1012",    # NextEra Energy Inc.
+    "CVX": "US1667649720",    # Chevron Corporation
+    "BRK.B": "US12142K1002",  # Berkshire Hathaway Inc. Class B
+    "PEP": "US7134481081",    # PepsiCo Inc.
+    "DIS": "US2546871060",    # The Walt Disney Company
+    "INTC": "US4581401001",   # Intel Corporation
+    "AMD": "US0079031078",    # Advanced Micro Devices
+    "CSCO": "US1729674242",   # Cisco Systems Inc.
+    "ORCL": "US68389X1054",   # Oracle Corporation
+    "BA": "US0970231058",     # The Boeing Company
+    "GE": "US3696043013",     # GE Aerospace
+}
 
 
 class CarbonService:
-    """Fetch annual Scope 1+2 / intensity from Clarity AI."""
+    """Fetch and manage carbon emission data (Clarity AI → Bavest → DB)."""
 
     def __init__(self, app=None):
         self.app = app
-        self._api_key = ""
-        self._api_secret = ""
-        self._base_url = "https://api.clarity.ai/clarity/v1"
+        self._clarity_key = ""
+        self._clarity_secret = ""
+        self._clarity_base = ""
+        self._clarity_timeout = 20
         self._token = None
-        self._token_expires = 0.0
+        self._token_expiry = 0.0
+
+        # Climatiq (spend-based estimation)
+        self._climatiq_key = ""
+        self._climatiq_base = ""
+        self._sector_factors = {}  # sector -> factor entry dict or None
+
+        # Ticker → ISIN lookup (static map + env-provided overrides)
+        self._isin_map = dict(TICKER_ISIN_MAP)
+
+        # Legacy/secondary provider
+        self._bavest_key = ""
+        self._bavest_base = ""
 
     def init_app(self, app):
         self.app = app
-        self._api_key = app.config.get("CLARITY_API_KEY", "") or ""
-        self._api_secret = app.config.get("CLARITY_API_SECRET", "") or ""
-        self._base_url = app.config.get(
-            "CLARITY_BASE_URL", "https://api.clarity.ai/clarity/v1"
-        ).rstrip("/")
-        # Legacy Bavest key is ignored for carbon; keep attr so old env still loads.
+        self._clarity_key = app.config.get("CLARITY_AI_KEY", "")
+        self._clarity_secret = app.config.get("CLARITY_AI_SECRET", "")
+        self._clarity_base = app.config.get(
+            "CLARITY_AI_BASE_URL", "https://api.clarity.ai/clarity/v1"
+        )
+        self._climatiq_key = app.config.get("CLIMATIQ_API_KEY", "")
+        self._climatiq_base = app.config.get(
+            "CLIMATIQ_BASE_URL", "https://api.climatiq.io"
+        )
         self._bavest_key = app.config.get("BAVEST_API_KEY", "")
+        self._bavest_base = app.config.get(
+            "BAVEST_BASE_URL", "https://api.bavest.co"
+        )
+        # Optional extra ticker→ISIN overrides, supplied as a JSON object:
+        #   ISIN_MAP_JSON='{"BRK.B": "US12142K1002", "SPGI": "US78409V1020"}'
+        import json
 
-    def is_configured(self) -> bool:
-        return bool(self._api_key and self._api_secret)
+        overrides = app.config.get("ISIN_MAP_JSON", "")
+        if overrides:
+            try:
+                self._isin_map.update(json.loads(overrides))
+            except (ValueError, TypeError) as e:
+                logger.warning("Invalid ISIN_MAP_JSON ignored: %s", e)
 
-    def _headers(self, token: str) -> dict:
-        return {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
-    def _get_token(self) -> str | None:
-        if not self.is_configured():
-            logger.warning("Clarity AI key/secret not configured — skipping live carbon fetch")
-            return None
-        now = time.time()
-        if self._token and now < self._token_expires:
-            return self._token
+    def fetch_carbon_data(self, symbol):
+        """Fetch carbon emission data for a single symbol.
 
-        url = f"{self._base_url}/oauth/token"
-        try:
-            resp = requests.post(
-                url,
-                json={"key": self._api_key, "secret": self._api_secret},
-                timeout=20,
+        Tries Clarity AI (reported data), then Climatiq (spend-based
+        estimate), then Bavest.  Returns a dict matching the
+        CarbonEmission schema, or None when no provider is configured /
+        all fetches fail (caller falls back to DB).
+        """
+        result = None
+        if self._clarity_key and self._clarity_secret:
+            result = self._fetch_clarity(symbol)
+        if result is None and self._climatiq_key:
+            result = self._fetch_climatiq(symbol)
+        if result is None and self._bavest_key:
+            result = self._fetch_bavest(symbol)
+        if result is None:
+            logger.info(
+                "No carbon provider configured/failed for %s — DB fallback", symbol
             )
-            resp.raise_for_status()
-            payload = resp.json() or {}
-        except requests.RequestException as exc:
-            logger.error("Clarity OAuth failed: %s", exc)
-            return None
+        return result
 
-        token = payload.get("token") or payload.get("access_token")
-        if not token:
-            logger.error("Clarity OAuth response missing token: %s", list(payload.keys()))
-            return None
-        # Tokens last ~60 minutes; refresh a bit early.
-        self._token = token
-        self._token_expires = now + 50 * 60
-        return token
+    def fetch_and_store(self, symbol, db=None):
+        """Fetch carbon data and upsert into the database.
 
     def fetch_universe_carbon(self, symbols=None) -> list[dict] | None:
         """Pull SFDR carbon metrics for the screener universe.
 
         Returns a list of carbon row dicts, or None if not configured / failed.
         """
-        token = self._get_token()
-        if not token:
-            return None
+        if db is None and self.app is not None:
+            from app.extensions import db as _db
 
-        wanted = [s.upper() for s in (symbols or universe_symbols())]
-        security_ids = [COMPANY_ISINS[s] for s in wanted if s in COMPANY_ISINS]
-        if not security_ids:
-            logger.warning("No ISINs mapped for requested symbols")
-            return None
-
-        job_id = self._start_sfdr_job(token, security_ids)
-        if not job_id:
-            return None
-        if not self._wait_for_job(token, job_id):
-            return None
-        raw_rows = self._download_job(token, job_id)
-        if raw_rows is None:
-            return None
-        return self._rows_to_carbon(raw_rows, wanted)
-
-    def _start_sfdr_job(self, token: str, security_ids: list[str]) -> str | None:
-        url = f"{self._base_url}/public/securities/sfdr/metric-by-id/async"
-        body = {"metricIds": SFDR_METRICS, "securityIds": security_ids}
-        try:
-            resp = requests.post(url, json=body, headers=self._headers(token), timeout=30)
-            resp.raise_for_status()
-            payload = resp.json() or {}
-        except requests.RequestException as exc:
-            logger.error("Clarity SFDR job create failed: %s", exc)
-            return None
-
-        job_id = (
-            payload.get("jobId")
-            or payload.get("job_id")
-            or payload.get("uuid")
-            or payload.get("id")
-        )
-        if not job_id:
-            logger.error("Clarity SFDR job response missing jobId: %s", payload)
-            return None
-        logger.info("Clarity SFDR job started: %s", job_id)
-        return str(job_id)
-
-    def _wait_for_job(self, token: str, job_id: str) -> bool:
-        url = f"{self._base_url}/public/job/{job_id}/status"
-        timeout = 180
-        if self.app is not None:
-            timeout = int(self.app.config.get("CLARITY_JOB_TIMEOUT", 180))
-        else:
-            try:
-                timeout = int(current_app.config.get("CLARITY_JOB_TIMEOUT", 180))
-            except RuntimeError:
-                timeout = 180
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                resp = requests.get(url, headers=self._headers(token), timeout=20)
-                resp.raise_for_status()
-                payload = resp.json() or {}
-            except requests.RequestException as exc:
-                logger.error("Clarity job status failed: %s", exc)
-                return False
-
-            status = str(
-                payload.get("status") or payload.get("state") or payload.get("jobStatus") or ""
-            ).upper()
-            if status in ("SUCCESS", "SUCCEEDED", "DONE", "COMPLETED", "COMPLETE"):
-                return True
-            if status in ("FAILED", "ERROR", "CANCELLED", "CANCELED"):
-                logger.error("Clarity job %s failed: %s", job_id, payload)
-                return False
-            time.sleep(3)
-        logger.error("Clarity job %s timed out after %ss", job_id, timeout)
-        return False
-
-    def _download_job(self, token: str, job_id: str) -> list[dict] | None:
-        url = f"{self._base_url}/public/job/{job_id}/download"
-        try:
-            resp = requests.get(url, headers=self._headers(token), timeout=60)
-            resp.raise_for_status()
-        except requests.RequestException as exc:
-            logger.error("Clarity job download failed: %s", exc)
-            return None
-
-        ctype = (resp.headers.get("Content-Type") or "").lower()
-        text = resp.text or ""
-        if "json" in ctype or text.lstrip().startswith(("[", "{")):
-            try:
-                payload = resp.json()
-            except ValueError:
-                payload = None
-            if isinstance(payload, list):
-                return [row for row in payload if isinstance(row, dict)]
-            if isinstance(payload, dict):
-                for key in ("data", "results", "metrics", "items"):
-                    if isinstance(payload.get(key), list):
-                        return payload[key]
-                return [payload]
-        return self._parse_csv(text)
-
-    @staticmethod
-    def _parse_csv(text: str) -> list[dict]:
-        reader = csv.DictReader(io.StringIO(text))
-        return [dict(row) for row in reader]
-
-    def _rows_to_carbon(self, raw_rows: list[dict], symbols: list[str]) -> list[dict]:
-        """Pivot long (isin, metric, value) rows into our carbon_emissions schema."""
-        lookup = isin_to_symbol()
-        wanted = set(symbols)
-        by_symbol: dict[str, dict] = {}
-
-        for row in raw_rows:
-            isin = (
-                row.get("securityId")
-                or row.get("security_id")
-                or row.get("isin")
-                or row.get("ISIN")
-            )
-            metric = (
-                row.get("metricId")
-                or row.get("metric_id")
-                or row.get("metric")
-                or row.get("id")
-            )
-            value = _num(row.get("value") or row.get("metricValue") or row.get("val"))
-            year = row.get("year") or row.get("reportYear") or row.get("report_year")
-            symbol = lookup.get(str(isin).replace(" ", "").upper()) if isin else None
-            if not symbol and row.get("symbol"):
-                symbol = str(row["symbol"]).upper()
-            if not symbol or symbol not in wanted:
-                continue
-            bucket = by_symbol.setdefault(
-                symbol,
-                {"symbol": symbol, "metrics": {}, "report_year": None},
-            )
-            if metric:
-                bucket["metrics"][str(metric).upper()] = value
-            if year:
-                try:
-                    bucket["report_year"] = int(str(year)[:4])
-                except (TypeError, ValueError):
-                    pass
-
-        current_year = datetime.now(timezone.utc).year
-        results = []
-        for symbol, bucket in by_symbol.items():
-            metrics = bucket["metrics"]
-            scope1 = metrics.get("CARBON_EMISSIONS_SCOPE1")
-            scope2 = metrics.get("CARBON_EMISSIONS_SCOPE2")
-            total = metrics.get("CARBON_EMISSIONS")
-            if total is None and (scope1 is not None or scope2 is not None):
-                total = (scope1 or 0) + (scope2 or 0)
-            intensity = metrics.get("GHG_INTENSITY")
-            results.append(
-                {
-                    "symbol": symbol,
-                    "report_year": bucket["report_year"] or (current_year - 1),
-                    "scope1": scope1,
-                    "scope2": scope2,
-                    "total_emissions": total,
-                    "carbon_intensity_revenue": intensity,
-                    "revenue": None,
-                    "data_source": "clarity",
-                    "has_carbon_data": total is not None or intensity is not None,
-                }
-            )
-        logger.info("Parsed Clarity carbon rows for %s symbols", len(results))
-        return results
-
-    def fetch_carbon_data(self, symbol):
-        """Single-symbol helper used by older callers."""
-        rows = self.fetch_universe_carbon([symbol])
-        if not rows:
-            return None
-        return rows[0]
-
-    def fetch_and_store(self, symbol, db):
-        """Fetch one symbol and upsert. Prefer ``sync_carbon`` for the universe."""
-        from app.models.carbon_emission import CarbonEmission
+            db = _db
 
         raw = self.fetch_carbon_data(symbol)
         if not raw:
             return False
+
+        from app.models.carbon_emission import CarbonEmission
+        from app.models.company import Company
+
+        if not Company.query.filter_by(symbol=symbol).first():
+            # Unknown company — skip to keep FK valid
+            return False
+
         existing = CarbonEmission.query.filter_by(
             symbol=symbol, report_year=raw.get("report_year")
         ).first()
+
         if existing:
             for key, val in raw.items():
                 if hasattr(existing, key):
                     setattr(existing, key, val)
         else:
-            db.session.add(CarbonEmission(**raw))
+            db.session.add(CarbonEmission(symbol=symbol, **raw))
+
         db.session.commit()
         return True
 
@@ -315,7 +241,7 @@ class CarbonService:
                 "type": "threshold",
                 "unit": "tCO2e/$M",
                 "ops": ["<", ">", "<=", ">="],
-                "source": "Clarity AI",
+                "source": "Climatiq (est.)",
                 "update_frequency": "annual",
                 "description": "tCO2e per $M revenue; SFDR GHG_INTENSITY",
             },
@@ -327,7 +253,7 @@ class CarbonService:
                 "min": 0,
                 "max": 50000000,
                 "step": 100000,
-                "source": "Clarity AI",
+                "source": "Climatiq (est.)",
                 "update_frequency": "annual",
                 "description": "Scope 1 + Scope 2 total emissions (tCO2e)",
             },
@@ -337,7 +263,7 @@ class CarbonService:
                 "type": "threshold",
                 "unit": "%",
                 "ops": ["<", ">", "<=", ">="],
-                "source": "Clarity AI",
+                "source": "Climatiq (est.)",
                 "update_frequency": "annual",
                 "description": "Negative YoY intensity means emissions fell",
             },
@@ -356,5 +282,340 @@ class CarbonService:
             },
         ]
 
+    # ------------------------------------------------------------------
+    # Climatiq provider (spend-based estimation)
+    # ------------------------------------------------------------------
+
+    def _climatiq_headers(self):
+        return {"Authorization": f"Bearer {self._climatiq_key}"}
+
+    def _climatiq_search_factor(self, query):
+        """Search Climatiq for a public Money-unit (per-USD) emission factor.
+
+        Returns the best emission-factor dict (with ``activity_id``) or
+        None.  Prefers US-region factors, then global (_ZZ), then any
+        public factor.
+        """
+        resp = requests.get(
+            f"{self._climatiq_base}/data/v1/search",
+            headers=self._climatiq_headers(),
+            params={
+                "query": query,
+                "unit_type": "Money",
+                "data_version": "^37",
+                "results_per_page": 10,
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results") or []
+        us = [r for r in results if str(r.get("region", "")).upper().startswith("US")]
+        glob = [r for r in results if r.get("region") in ("_ZZ", "GLOBAL", "GLO")]
+        pool = us or glob or [r for r in results if r.get("access_type") == "public"]
+        for r in pool:
+            if r.get("activity_id"):
+                return r
+        return None
+
+    def _climatiq_measure_factor(self, activity_id):
+        """Measure a factor's effective kg CO2e per USD with a $1M probe.
+
+        Returns (kg_per_usd, estimate_payload).  Uses the estimate endpoint
+        because the raw ``factor`` value in search results is a paid add-on.
+        """
+        resp = requests.post(
+            f"{self._climatiq_base}/data/v1/estimate",
+            headers={**self._climatiq_headers(), "Content-Type": "application/json"},
+            json={
+                "emission_factor": {
+                    "activity_id": activity_id,
+                    "data_version": "^37",
+                },
+                "parameters": {"money": 1_000_000, "money_unit": "usd"},
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        co2e = payload.get("co2e")
+        if co2e is None or co2e <= 0:
+            raise ValueError(f"no co2e in Climatiq estimate response: {payload!r:.200}")
+        return co2e / 1_000_000.0, payload
+
+    def get_sector_factor(self, sector):
+        """Resolve (and cache) the spend-based factor for a TradingView sector.
+
+        Returns ``{"factor_kg_per_usd", "activity_id", "factor_name"}``
+        or None when the sector cannot be resolved.
+        """
+        if not self._climatiq_key:
+            return None
+        sector = (sector or "").strip() or "Other"
+        if sector in self._sector_factors:
+            return self._sector_factors[sector]
+
+        queries = [
+            q
+            for q in (
+                CLIMATIQ_SECTOR_QUERIES.get(sector),
+                sector,  # raw sector name often matches too
+                CLIMATIQ_FALLBACK_QUERY,
+            )
+            if q
+        ]
+        for query in queries:
+            try:
+                factor = self._climatiq_search_factor(query)
+                if not factor:
+                    continue
+                kg_per_usd, _ = self._climatiq_measure_factor(factor["activity_id"])
+                entry = {
+                    "factor_kg_per_usd": kg_per_usd,
+                    "activity_id": factor["activity_id"],
+                    "factor_name": factor.get("name"),
+                }
+                self._sector_factors[sector] = entry
+                logger.info(
+                    "Climatiq factor for %r: %s (%s) = %.6g kg CO2e/USD",
+                    sector,
+                    entry["factor_name"],
+                    entry["activity_id"],
+                    kg_per_usd,
+                )
+                return entry
+            except (requests.RequestException, ValueError) as e:
+                logger.warning(
+                    "Climatiq factor resolution failed for %r (query %r): %s",
+                    sector,
+                    query,
+                    e,
+                )
+        self._sector_factors[sector] = None  # negative cache
+        return None
+
+    def estimate_company_emissions(self, sector, revenue):
+        """Estimate one company's emissions from sector factor × revenue.
+
+        Returns a CarbonEmission-schema dict, or None when the sector
+        factor is unavailable or revenue is missing/zero.
+        """
+        entry = self.get_sector_factor(sector)
+        if not entry:
+            return None
+        try:
+            revenue = float(revenue)
+        except (TypeError, ValueError):
+            return None
+        if revenue <= 0:
+            return None
+
+        factor = entry["factor_kg_per_usd"]
+        # kg CO2e → metric tons; intensity is tCO2e per $1M revenue
+        total_t = revenue * factor / 1000.0
+        intensity = factor * 1000.0
+        return {
+            "report_year": datetime.now().year,
+            "scope1": None,  # spend-based factors give a combined figure only
+            "scope2": None,
+            "total_emissions": round(total_t, 2),
+            "carbon_intensity_revenue": round(intensity, 4),
+            "carbon_change_yoy": None,
+            "revenue": round(revenue, 2),
+            "data_source": "climatiq",
+            "has_carbon_data": True,
+        }
+
+    def _fetch_climatiq(self, symbol):
+        """Estimate carbon data for one symbol using its DB sector+revenue."""
+        try:
+            from app.models.company import Company
+            from app.models.financial_metric import FinancialMetric
+
+            company = Company.query.filter_by(symbol=symbol).first()
+            if not company:
+                return None
+            fm = (
+                FinancialMetric.query.filter_by(symbol=symbol)
+                .order_by(FinancialMetric.date.desc())
+                .first()
+            )
+            revenue = float(fm.revenue) if fm and fm.revenue else None
+            if not revenue:
+                logger.info(
+                    "No revenue in DB for %s — Climatiq estimation skipped", symbol
+                )
+                return None
+            return self.estimate_company_emissions(company.sector, revenue)
+        except Exception as e:  # noqa: BLE001 — degrade to Bavest/DB
+            logger.error("Climatiq estimation failed for %s: %s", symbol, e)
+            return None
+
+    # ------------------------------------------------------------------
+    # Clarity AI provider
+    # ------------------------------------------------------------------
+
+    def _get_token(self):
+        """Obtain (and cache) a Clarity AI bearer token. Returns None on
+        failure so callers can degrade gracefully."""
+        if self._token and time.time() < self._token_expiry - 60:
+            return self._token
+
+        try:
+            resp = requests.post(
+                f"{self._clarity_base}/oauth/token",
+                json={"key": self._clarity_key, "secret": self._clarity_secret},
+                timeout=self._clarity_timeout,
+            )
+            resp.raise_for_status()
+            token = resp.json().get("token")
+            if not token:
+                raise ValueError("empty token in response")
+            # Tokens expire in ~60 minutes; refresh 5 min early
+            self._token = token
+            self._token_expiry = time.time() + 55 * 60
+            return token
+        except (requests.RequestException, ValueError) as e:
+            logger.error("Clarity AI auth failed: %s", e)
+            self._token = None
+            return None
+
+    def _fetch_clarity(self, symbol):
+        """Fetch carbon data for one ticker via Clarity AI SFDR endpoints.
+
+        Returns a CarbonEmission-schema dict or None.
+        """
+        token = self._get_token()
+        if not token:
+            return None
+
+        # Clarity AI identifies securities by ISIN — map from ticker.
+        isin = self._symbol_to_isin(symbol)
+        if not isin:
+            logger.warning("No ISIN mapping for %s — Clarity AI skipped", symbol)
+            return None
+
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            # 1. Submit async job
+            resp = requests.post(
+                f"{self._clarity_base}/public/securities/sfdr/metric-by-id/async",
+                headers=headers,
+                json={"metricIds": CLARITY_METRICS, "securityIds": [isin]},
+                timeout=self._clarity_timeout,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            job_id = payload.get("jobId") or payload.get("job_id")
+            if not job_id:
+                # Some environments return data synchronously
+                if "metrics" in payload or "data" in payload:
+                    return self._parse_clarity_payload(
+                        payload.get("data") or payload, isin
+                    )
+                raise ValueError(f"no jobId in response: {payload!r:.200}")
+
+            # 2. Poll until the job completes
+            deadline = time.time() + JOB_POLL_TIMEOUT
+            while time.time() < deadline:
+                time.sleep(JOB_POLL_INTERVAL)
+                job = requests.get(
+                    f"{self._clarity_base}/public/jobs/{job_id}",
+                    headers=headers,
+                    timeout=self._clarity_timeout,
+                )
+                job.raise_for_status()
+                status = (job.json().get("status") or "").upper()
+                if status in ("DONE", "COMPLETED", "FINISHED"):
+                    data = job.json().get("data") or {}
+                    return self._parse_clarity_payload(data, isin)
+                if status in ("ERROR", "FAILED"):
+                    raise ValueError(f"Clarity AI job failed: {job.json()!r:.200}")
+            raise TimeoutError("Clarity AI job polling timed out")
+
+        except Exception as e:  # noqa: BLE001 — degrade to Bavest/DB
+            logger.error("Clarity AI fetch failed for %s: %s", symbol, e)
+            return None
+
+    def _parse_clarity_payload(self, data, isin):
+        """Normalize a Clarity AI metrics payload into our schema."""
+        # Payload shapes vary by module; handle both list-of-metrics and dict
+        metrics = {}
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and "id" in item:
+                    metrics[item["id"]] = item.get("value")
+        elif isinstance(data, dict):
+            metrics = {
+                k: v.get("value") if isinstance(v, dict) else v
+                for k, v in data.items()
+            }
+
+        scope1 = metrics.get("CARBON_EMISSIONS_SCOPE1")
+        scope2 = metrics.get("CARBON_EMISSIONS_SCOPE2")
+        total = metrics.get("CARBON_EMISSIONS")
+        if total is None and (scope1 or scope2):
+            total = (scope1 or 0) + (scope2 or 0)
+
+        if total is None and scope1 is None and scope2 is None:
+            return None  # no carbon disclosure for this security
+
+        return {
+            "report_year": int(metrics.get("reportYear") or
+                               metrics.get("report_year") or 2025),
+            "scope1": scope1,
+            "scope2": scope2,
+            "total_emissions": total,
+            "carbon_intensity_revenue": metrics.get("GHG_INTENSITY"),
+            "carbon_change_yoy": metrics.get("GHG_INTENSITY_YOY"),
+            "revenue": metrics.get("REVENUE"),
+            "data_source": "clarity_ai",
+            "has_carbon_data": True,
+        }
+
+    def _symbol_to_isin(self, symbol):
+        """Map a US ticker to an ISIN.
+
+        Lookup order: env-provided overrides (merged in ``init_app``) →
+        built-in static map.  Returns None for unknown tickers, which makes
+        the Clarity AI fetch skip that symbol (Bavest/DB fallback applies).
+        """
+        if not symbol:
+            return None
+        return self._isin_map.get(symbol.strip().upper())
+
+    # ------------------------------------------------------------------
+    # Bavest provider (secondary)
+    # ------------------------------------------------------------------
+
+    def _fetch_bavest(self, symbol):
+        """Fetch carbon data for a single symbol from the Bavest API."""
+        url = f"{self._bavest_base}/v1/esg/carbon-footprint/{symbol}"
+        headers = {
+            "Authorization": f"Bearer {self._bavest_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            logger.info("Fetched carbon data for %s (Bavest)", symbol)
+            return self._parse_bavest_response(resp.json())
+        except requests.RequestException as e:
+            logger.error("Bavest API request failed for %s: %s", symbol, e)
+            return None
+
+    @staticmethod
+    def _parse_bavest_response(data):
+        """Parse the Bavest API response into our schema."""
+        return {
+            "report_year": data.get("year", 2025),
+            "scope1": data.get("scope_1_emissions"),
+            "scope2": data.get("scope_2_emissions"),
+            "total_emissions": data.get("total_emissions"),
+            "carbon_intensity_revenue": data.get("carbon_intensity"),
+            "carbon_change_yoy": data.get("carbon_intensity_change_yoy"),
+            "revenue": data.get("revenue"),
+            "data_source": "bavest",
+            "has_carbon_data": True,
+        }
 
 carbon_service = CarbonService()
