@@ -74,6 +74,7 @@ def create_app(config_class=None):
             preset_template,
             user,
             password_reset_code,
+            data_sync_log,
         )  # noqa: F401
 
         # Log which database we are actually talking to

@@ -6,6 +6,7 @@ from app.models.carbon_emission import CarbonEmission
 from app.models.preset_template import PresetTemplate
 from app.models.user import User
 from app.models.password_reset_code import PasswordResetCode
+from app.models.data_sync_log import DataSyncLog
 
 __all__ = [
     "Company",
@@ -14,4 +15,5 @@ __all__ = [
     "PresetTemplate",
     "User",
     "PasswordResetCode",
+    "DataSyncLog",
 ]
