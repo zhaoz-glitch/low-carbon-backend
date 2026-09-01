@@ -39,14 +39,14 @@ def get_fields():
         "dimensions": [
             {
                 "key": "market",
-                "label": "维度A：市场与技术面",
-                "update_frequency": "实时 / 日更",
+                "label": "A · Market & Technicals",
+                "update_frequency": "Real-time / Daily",
                 "fields": market_fields,
             },
             {
                 "key": "carbon",
-                "label": "维度B：绿色 / 碳排指标",
-                "update_frequency": "年度更新",
+                "label": "B · Green / Carbon",
+                "update_frequency": "Annual",
                 "fields": carbon_fields,
             },
         ],
@@ -91,6 +91,9 @@ def run_screener():
         sort_order = "desc"
 
     try:
+        from app.jobs.sync import maybe_refresh_live_quotes
+
+        maybe_refresh_live_quotes()
         result = screener_service.run_screener(
             filters=filters,
             page=page,

@@ -37,7 +37,7 @@ class CarbonEmission(db.Model):
     revenue = db.Column(db.Numeric(20, 2))  # annual revenue (USD)
 
     # Data source tracking
-    data_source = db.Column(db.String(100), default="bavest")
+    data_source = db.Column(db.String(100), default="mock")
     has_carbon_data = db.Column(db.Boolean, default=True)
 
     created_at = db.Column(

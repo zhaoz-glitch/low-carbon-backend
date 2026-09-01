@@ -17,6 +17,7 @@ class Company(db.Model):
     industry = db.Column(db.String(200))
     exchange = db.Column(db.String(50))  # e.g. "NASDAQ"
     market_cap = db.Column(db.Numeric(20, 2))  # in USD
+    isin = db.Column(db.String(12), index=True)  # Clarity AI security id
 
     created_at = db.Column(
         db.DateTime, default=lambda: datetime.now(timezone.utc)
@@ -45,6 +46,7 @@ class Company(db.Model):
             "industry": self.industry,
             "exchange": self.exchange,
             "market_cap": float(self.market_cap) if self.market_cap else None,
+            "isin": self.isin,
         }
 
     def __repr__(self):

@@ -2,7 +2,7 @@
 
 from flask import Flask, jsonify
 from .config import get_config
-from .extensions import db, migrate, cors
+from .extensions import db, cors, migrate
 
 
 def create_app(config_class=None):
@@ -14,7 +14,8 @@ def create_app(config_class=None):
 
     # Initialize extensions
     db.init_app(app)
-    migrate.init_app(app, db)
+    if migrate is not None:
+        migrate.init_app(app, db)
     cors.init_app(app, resources={r"/api/*": {"origins": "*"}})
 
     # Register blueprints
@@ -22,16 +23,27 @@ def create_app(config_class=None):
     from app.routes.stock import stock_bp
     from app.routes.auth import auth_bp
     from app.routes.db_admin import db_bp
+    from app.routes.jobs import jobs_bp
 
     app.register_blueprint(screener_bp, url_prefix="/api")
     app.register_blueprint(stock_bp, url_prefix="/api")
     app.register_blueprint(auth_bp, url_prefix="/api")
     app.register_blueprint(db_bp, url_prefix="/api")
+    app.register_blueprint(jobs_bp, url_prefix="/api")
 
     # Health check
     @app.route("/health")
     def health():
-        return jsonify(status="ok", service="low-carbon-screener-backend")
+        payload = {"status": "ok", "service": "low-carbon-screener-backend"}
+        try:
+            from app.jobs.sync import latest_sync
+
+            payload["last_market_sync"] = latest_sync("market")
+            payload["last_carbon_sync"] = latest_sync("carbon")
+        except Exception:
+            payload["last_market_sync"] = None
+            payload["last_carbon_sync"] = None
+        return jsonify(payload)
 
     # Error handlers
     @app.errorhandler(400)
@@ -48,19 +60,34 @@ def create_app(config_class=None):
 
     # Create tables (dev only; use migrations in production)
     with app.app_context():
-        from app.models import (
+        from app.models import (  # noqa: F401
             company,
             financial_metric,
             carbon_emission,
             preset_template,
             user,
-        )  # noqa: F401
+            data_sync_log,
+            password_reset,
+        )
 
         db.create_all()
 
+        from app.utils.schema import ensure_schema
         from app.utils.mock_data import seed_demo_user, seed_mock_data
+        from app.jobs.sync import seed_company_isins, recover_stale_jobs
+        from app.services.tradingview_service import tradingview_service
+        from app.services.carbon_service import carbon_service
 
+        ensure_schema()
         seed_mock_data(db)
         seed_demo_user(db)
+        seed_company_isins()
+        recover_stale_jobs()
+        tradingview_service.init_app(app)
+        carbon_service.init_app(app)
+
+    from app.jobs.scheduler import start_scheduler
+
+    start_scheduler(app)
 
     return app

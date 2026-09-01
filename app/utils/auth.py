@@ -84,15 +84,15 @@ def login_required(fn):
             token = auth_header[7:]
 
         if not token:
-            return {"error": "未登录"}, 401
+            return {"error": "Not signed in"}, 401
 
         user_id = verify_token(token)
         if user_id is None:
-            return {"error": "登录已过期，请重新登录"}, 401
+            return {"error": "Session expired. Please sign in again."}, 401
 
         user = User.query.get(user_id)
         if user is None:
-            return {"error": "用户不存在"}, 401
+            return {"error": "User not found"}, 401
 
         g.user = user
         return fn(*args, **kwargs)

@@ -39,6 +39,8 @@ class FinancialMetric(db.Model):
     net_profit_margin = db.Column(db.Numeric(10, 2))  # net profit margin (%)
     revenue_growth = db.Column(db.Numeric(10, 2))  # YoY revenue growth (%)
 
+    data_source = db.Column(db.String(50), default="mock")
+
     created_at = db.Column(
         db.DateTime, default=lambda: datetime.now(timezone.utc)
     )
@@ -62,6 +64,7 @@ class FinancialMetric(db.Model):
             "week_52_change": float(self.week_52_change) if self.week_52_change else None,
             "net_profit_margin": float(self.net_profit_margin) if self.net_profit_margin else None,
             "revenue_growth": float(self.revenue_growth) if self.revenue_growth else None,
+            "data_source": self.data_source,
         }
 
     def __repr__(self):

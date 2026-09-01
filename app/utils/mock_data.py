@@ -12,33 +12,9 @@ from datetime import date
 
 from sqlalchemy.exc import IntegrityError
 
+from app.universe import COMPANY_ISINS, SAMPLE_COMPANIES
+
 logger = logging.getLogger(__name__)
-
-
-# --- Sample company data ---
-# Format: (symbol, name, sector, industry, exchange, market_cap)
-SAMPLE_COMPANIES = [
-    ("AAPL", "Apple Inc.", "Technology", "Consumer Electronics", "NASDAQ", 3310000000000),
-    ("MSFT", "Microsoft Corporation", "Technology", "Software", "NASDAQ", 3150000000000),
-    ("GOOGL", "Alphabet Inc.", "Communication Services", "Internet Content", "NASDAQ", 2100000000000),
-    ("AMZN", "Amazon.com Inc.", "Consumer Cyclical", "Internet Retail", "NASDAQ", 1900000000000),
-    ("NVDA", "NVIDIA Corporation", "Technology", "Semiconductors", "NASDAQ", 2950000000000),
-    ("META", "Meta Platforms Inc.", "Communication Services", "Internet Content", "NASDAQ", 1340000000000),
-    ("TSLA", "Tesla Inc.", "Consumer Cyclical", "Auto Manufacturers", "NASDAQ", 820000000000),
-    ("JPM", "JPMorgan Chase & Co.", "Financial Services", "Banks - Diversified", "NYSE", 580000000000),
-    ("V", "Visa Inc.", "Financial Services", "Credit Services", "NYSE", 520000000000),
-    ("JNJ", "Johnson & Johnson", "Healthcare", "Drug Manufacturers", "NYSE", 390000000000),
-    ("WMT", "Walmart Inc.", "Consumer Defensive", "Discount Stores", "NYSE", 420000000000),
-    ("XOM", "Exxon Mobil Corporation", "Energy", "Oil & Gas Integrated", "NYSE", 480000000000),
-    ("PG", "Procter & Gamble Co.", "Consumer Defensive", "Household Products", "NYSE", 390000000000),
-    ("KO", "Coca-Cola Co.", "Consumer Defensive", "Beverages", "NYSE", 280000000000),
-    ("HD", "Home Depot Inc.", "Consumer Cyclical", "Home Improvement Retail", "NYSE", 380000000000),
-    ("AVGO", "Broadcom Inc.", "Technology", "Semiconductors", "NASDAQ", 780000000000),
-    ("MA", "Mastercard Inc.", "Financial Services", "Credit Services", "NYSE", 450000000000),
-    ("UNH", "UnitedHealth Group Inc.", "Healthcare", "Healthcare Plans", "NYSE", 530000000000),
-    ("NEE", "NextEra Energy Inc.", "Utilities", "Utilities - Renewable", "NYSE", 165000000000),
-    ("CVX", "Chevron Corporation", "Energy", "Oil & Gas Integrated", "NYSE", 290000000000),
-]
 
 
 # --- Sample financial metrics (as of latest date) ---
@@ -185,6 +161,7 @@ def seed_mock_data(db):
             industry=industry,
             exchange=exchange,
             market_cap=mcap,
+            isin=COMPANY_ISINS.get(sym),
         )
         db.session.add(company)
 
@@ -203,6 +180,7 @@ def seed_mock_data(db):
             revenue_growth=fin[7],
             close=fin[8],
             market_cap=fin[9],
+            data_source="mock",
         )
         db.session.add(fm)
 
@@ -213,9 +191,9 @@ def seed_mock_data(db):
     # Seed preset templates from the PRD
     templates = [
         PresetTemplate(
-            name="低碳价值陷阱",
-            description="PE < 15 且碳强度同比下降 > 5%",
-            use_case="寻找被低估的转型中公司",
+            name="Low-Carbon Value",
+            description="PE < 15 and carbon intensity down > 5% YoY",
+            use_case="Undervalued transition names",
             filters={
                 "price_earnings_ttm": {"max": 15},
                 "carbon_change_yoy": {"max": -5},
@@ -223,9 +201,9 @@ def seed_mock_data(db):
             },
         ),
         PresetTemplate(
-            name="绿色高成长",
-            description="营收增长 > 20% 且碳强度 < 行业均值 50%",
-            use_case="挖掘绿色赛道成长股",
+            name="Green Growth",
+            description="Revenue growth > 20% and intensity below peer average",
+            use_case="Green-path growth stocks",
             filters={
                 "revenue_growth": {"min": 20},
                 "carbon_intensity_revenue": {"max": 15},
@@ -233,9 +211,9 @@ def seed_mock_data(db):
             },
         ),
         PresetTemplate(
-            name="净零先锋",
-            description="碳强度同比下降 > 15% 且绝对排放量 < 500万吨",
-            use_case="关注激进减排公司",
+            name="Net-Zero Leaders",
+            description="Intensity down > 15% YoY and emissions < 5 Mt",
+            use_case="Aggressive decarbonizers",
             filters={
                 "carbon_change_yoy": {"max": -15},
                 "total_emissions": {"max": 5000000},
@@ -243,9 +221,9 @@ def seed_mock_data(db):
             },
         ),
         PresetTemplate(
-            name="高股息绿色标的",
-            description="股息率 > 3% 且碳强度 < 200 tCO2e/$M",
-            use_case="稳健收益型绿色投资",
+            name="Green High Yield",
+            description="Dividend yield > 3% and intensity < 200 tCO2e/$M",
+            use_case="Income-oriented green exposure",
             filters={
                 "dividend_yield_recent": {"min": 3},
                 "carbon_intensity_revenue": {"max": 200},

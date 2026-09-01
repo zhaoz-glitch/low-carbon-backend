@@ -18,4 +18,4 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true", default=True, help="Enable debug mode")
     args = parser.parse_args()
 
-    app.run(host=args.host, port=args.port, debug=args.debug)
+    app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)

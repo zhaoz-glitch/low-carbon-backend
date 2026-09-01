@@ -13,9 +13,9 @@ venv/
 .venv/
 env/
 
-# Environment variables
 .env
-.env.*
+.env.local
+!.env.example
 
 # Database
 *.db
@@ -42,3 +42,4 @@ htmlcov/
 
 # Logs
 *.log
+.railway/
