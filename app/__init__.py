@@ -101,6 +101,15 @@ def create_app(config_class=None):
             print(f"[boot] DB URL inspect failed: {_e}", flush=True)
 
         db.create_all()
+
+        # Add columns that exist in the ORM but not in the live tables
+        # (create_all never alters existing tables — see schema_sync docstring)
+        from app.utils.schema_sync import ensure_schema
+        try:
+            ensure_schema(db)
+        except Exception as _e:
+            print(f"[boot] schema sync failed (non-fatal): {_e}", flush=True)
+
         try:
             _post_tables = _insp(db.engine).get_table_names()
             print(f"[boot] create_all produced tables: {_post_tables}", flush=True)
