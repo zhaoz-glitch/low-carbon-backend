@@ -5,6 +5,7 @@ Endpoints:
   POST /api/auth/login    — email + password → token
   GET  /api/auth/me       — current user info (requires token in Authorization header)
   POST /api/auth/forgot-password — email → send 6-digit reset code
+  POST /api/auth/verify-reset-code — email + code → validate code without resetting
   POST /api/auth/reset-password  — email + code + new password → reset
 """
 
@@ -186,6 +187,40 @@ def forgot_password():
     send_password_reset_code(email, code)
     logger.info("Password reset code issued for %s", email)
     return jsonify({"message": "验证码已发送到你的邮箱"}), 200
+
+
+@auth_bp.route("/auth/verify-reset-code", methods=["POST"])
+def verify_reset_code():
+    """Validate a reset code without actually resetting the password.
+
+    Request body::
+
+        {"email": "user@example.com", "code": "123456"}
+
+    Returns 200 if the code is valid and not expired, 400 otherwise.
+    """
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    code = (data.get("code") or "").strip()
+
+    if not email or not _EMAIL_RE.match(email):
+        return jsonify({"error": "请输入有效的邮箱地址"}), 400
+    if not code:
+        return jsonify({"error": "请输入验证码"}), 400
+
+    user = User.query.filter_by(email=email).first()
+    if user is None:
+        return jsonify({"error": "验证码无效或已过期"}), 400
+
+    record = (
+        PasswordResetCode.query.filter_by(email=email, code=code, used=False)
+        .order_by(PasswordResetCode.id.desc())
+        .first()
+    )
+    if record is None or record.is_expired():
+        return jsonify({"error": "验证码无效或已过期"}), 400
+
+    return jsonify({"message": "验证码有效"}), 200
 
 
 @auth_bp.route("/auth/reset-password", methods=["POST"])
