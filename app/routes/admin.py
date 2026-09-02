@@ -111,6 +111,51 @@ def admin_status():
     })
 
 
+@admin_bp.route("/admin/backfill-carbon-history", methods=["POST"])
+def backfill_carbon_history():
+    """Run ``scripts/backfill_carbon_history.py`` to extrapolate 5-year history.
+
+    Body (JSON, all optional):
+        {
+            "year_start": 2020,      # first historical year (inclusive)
+            "year_end":   2025,      # last historical year (inclusive, before latest)
+            "dry_run":    false      # when true, compute but roll back
+        }
+
+    Returns ``{ok, returncode, duration_s, summary, stderr_tail}``.
+    """
+    if not _check_token():
+        return jsonify({"error": "forbidden"}), 403
+
+    body = request.get_json(silent=True) or {}
+    year_start = int(body.get("year_start", 2020))
+    year_end = int(body.get("year_end", 2025))
+    dry_run = bool(body.get("dry_run", False))
+
+    if year_start > year_end:
+        return jsonify({"error": "year_start must be <= year_end"}), 400
+
+    args = [sys.executable, "scripts/backfill_carbon_history.py",
+            "--year-start", str(year_start),
+            "--year-end",   str(year_end)]
+    if dry_run:
+        args.append("--dry-run")
+
+    rc, out, err, secs = _run_subprocess(args, timeout=600)
+    summary = _last_matching(out, "BACKFILL_RESULT") or _last_matching(err, "BACKFILL_RESULT")
+    result = {
+        "ok": rc == 0,
+        "returncode": rc,
+        "duration_s": round(secs, 1),
+        "summary": summary,
+        "year_start": year_start,
+        "year_end": year_end,
+        "dry_run": dry_run,
+        "stderr_tail": err[-500:] if err else "",
+    }
+    return jsonify(result), (200 if rc == 0 else 500)
+
+
 def _last_matching(text: str, prefix: str) -> str | None:
     if not text:
         return None

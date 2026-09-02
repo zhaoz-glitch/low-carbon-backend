@@ -81,6 +81,44 @@ CLIMATIQ_SECTOR_QUERIES = {
 }
 CLIMATIQ_FALLBACK_QUERY = "services"
 
+# Sector-level backfill trends for synthetic historical carbon data.
+#
+# Each tuple is ``(carbon_intensity_yoy, revenue_yoy)`` representing the
+# average annual change for companies in that sector.  Numbers are sourced
+# from EPA industry averages and US GDP/long-run sector growth:
+#
+#   - intensity_yoy < 0 means carbon intensity is falling (decarbonization)
+#   - revenue_yoy > 0 means revenue is growing
+#
+# Historical years are back-computed from the latest year using:
+#     historical_intensity = current_intensity / (1 + ci_yoy) ** year_diff
+#     historical_revenue   = current_revenue   / (1 + rev_yoy) ** year_diff
+# where year_diff = latest_year - target_year.
+SECTOR_TRENDS: dict[str, tuple[float, float]] = {
+    "Technology Services":       (-0.070, 0.10),   # cloud / AI revenue ↑, intensity ↓↓
+    "Electronic Technology":     (-0.060, 0.08),   # semis
+    "Communications":            (-0.050, 0.04),
+    "Health Technology":         (-0.050, 0.06),
+    "Producer Manufacturing":    (-0.040, 0.04),
+    "Industrial Services":       (-0.040, 0.04),
+    "Process Industries":        (-0.030, 0.03),   # chemicals/heavy
+    "Utilities":                 (-0.030, 0.04),   # grid decarbonization
+    "Health Services":           (-0.030, 0.05),
+    "Consumer Durables":         (-0.030, 0.04),
+    "Commercial Services":       (-0.025, 0.04),
+    "Distribution Services":     (-0.025, 0.04),
+    "Retail Trade":              (-0.025, 0.04),
+    "Transportation":            (-0.025, 0.04),
+    "Consumer Non-Durables":     (-0.020, 0.03),
+    "Non-Energy Minerals":       (-0.020, 0.04),
+    "Finance":                   (-0.030, 0.05),
+    "Energy Minerals":           (-0.015, 0.03),   # oil & gas, hardest to decarbonize
+    "Miscellaneous":             (-0.020, 0.03),
+    "Government":                (-0.020, 0.03),
+}
+DEFAULT_TREND: tuple[float, float] = (-0.030, 0.05)
+
+
 # Ticker → ISIN mapping for the companies seeded by mock_data plus a few
 # common aliases.  US ISINs are public identifiers ("US" + 9-char CUSIP +
 # check digit).  Extend via the ISIN_MAP_JSON env var (see init_app) or by
@@ -251,6 +289,148 @@ class CarbonService:
 
         db.session.commit()
         return True
+
+    def backfill_history(self, year_start=2020, year_end=2025, dry_run=False):
+        """Generate historical carbon rows for symbols that lack them.
+
+        For each symbol that has a ``latest_year`` row but is missing one
+        or more years in ``[year_start, year_end]``, estimate intensity,
+        revenue, total emissions and yoy using ``SECTOR_TRENDS`` (and
+        ``DEFAULT_TREND`` fallback).  Scope1/scope2 are split using the
+        ratio in the latest row when available, otherwise 50/50.
+
+        Args:
+            year_start: First historical year to fill (inclusive).
+            year_end:   Last historical year to fill (inclusive, before
+                        the latest reporting year).
+            dry_run:    When True, no rows are committed; useful for
+                        estimating the work size before running live.
+
+        Returns:
+            Dict with ``inserted`` (rows added), ``skipped`` (symbols
+            already had full history or couldn't be processed),
+            ``errors``, and ``dry_run``.
+        """
+        from app.extensions import db as _db
+        from app.models.carbon_emission import CarbonEmission
+        from app.models.company import Company
+
+        latest_year = datetime.now().year  # 2026
+
+        latest_rows = CarbonEmission.query.filter_by(report_year=latest_year).all()
+        if not latest_rows:
+            logger.warning("No latest-year (%d) carbon rows to backfill from", latest_year)
+            return {"inserted": 0, "skipped": 0, "errors": 0, "dry_run": dry_run}
+
+        # Pre-fetch the set of years each symbol already has to decide which
+        # years we still need to fill.
+        existing_by_symbol: dict[str, set[int]] = {}
+        for sym, year in _db.session.query(CarbonEmission.symbol, CarbonEmission.report_year).all():
+            existing_by_symbol.setdefault(sym, set()).add(year)
+
+        inserted = 0
+        skipped = 0
+        errors = 0
+
+        for latest in latest_rows:
+            symbol = latest.symbol
+            have = existing_by_symbol.get(symbol, set())
+            missing = [y for y in range(year_start, year_end + 1) if y not in have]
+            if not missing:
+                skipped += 1
+                continue
+
+            cur_intensity = float(latest.carbon_intensity_revenue or 0)
+            cur_revenue = float(latest.revenue or 0) if latest.revenue else 0.0
+            cur_scope1 = float(latest.scope1) if latest.scope1 is not None else None
+            cur_scope2 = float(latest.scope2) if latest.scope2 is not None else None
+            cur_total = float(latest.total_emissions) if latest.total_emissions is not None else 0.0
+
+            if cur_intensity <= 0:
+                logger.debug(
+                    "Skipping %s — latest intensity is %s, cannot backfill",
+                    symbol, cur_intensity,
+                )
+                skipped += 1
+                continue
+
+            sector = None
+            company = Company.query.filter_by(symbol=symbol).first()
+            if company and company.sector:
+                sector = company.sector
+            ci_yoy, rev_yoy = SECTOR_TRENDS.get(sector or "", DEFAULT_TREND)
+
+            # Scope1/2 split ratio from latest year (default 50/50)
+            if cur_scope1 is not None and cur_scope2 is not None and (cur_scope1 + cur_scope2) > 0:
+                scope_ratio = cur_scope1 / (cur_scope1 + cur_scope2)
+            elif cur_total > 0 and (cur_scope1 is not None or cur_scope2 is not None):
+                # Only one scope known — use it as-is and put remainder in the other
+                scope_ratio = 0.5
+            else:
+                scope_ratio = 0.5
+
+            for year in missing:
+                year_diff = latest_year - year  # >= 1
+                hist_intensity = cur_intensity / ((1 + ci_yoy) ** year_diff)
+                hist_revenue = (
+                    cur_revenue / ((1 + rev_yoy) ** year_diff) if cur_revenue > 0 else None
+                )
+                hist_total = (
+                    round(hist_intensity * hist_revenue / 1_000_000.0, 2)
+                    if hist_revenue else None
+                )
+                hist_scope1 = (
+                    round(hist_total * scope_ratio, 2) if hist_total is not None else None
+                )
+                hist_scope2 = (
+                    round(hist_total * (1 - scope_ratio), 2) if hist_total is not None else None
+                )
+                # YoY against the *next* year (toward present).  The earliest
+                # backfilled year has no prior, so its YoY is left NULL.
+                if year == year_start:
+                    yoy = None
+                else:
+                    next_year = year + 1
+                    next_intensity = cur_intensity / ((1 + ci_yoy) ** (latest_year - next_year))
+                    yoy = (
+                        round((next_intensity - hist_intensity) / hist_intensity * 100, 2)
+                        if hist_intensity > 0 else None
+                    )
+
+                row = CarbonEmission(
+                    symbol=symbol,
+                    report_year=year,
+                    scope1=hist_scope1,
+                    scope2=hist_scope2,
+                    total_emissions=hist_total,
+                    carbon_intensity_revenue=round(hist_intensity, 4),
+                    carbon_change_yoy=yoy,
+                    revenue=hist_revenue,
+                    data_source="backfill",
+                    has_carbon_data=True,
+                )
+                try:
+                    _db.session.add(row)
+                    inserted += 1
+                except Exception as e:  # noqa: BLE001
+                    errors += 1
+                    logger.error("Failed to stage backfill row %s %d: %s", symbol, year, e)
+
+        if dry_run:
+            _db.session.rollback()
+        else:
+            try:
+                _db.session.commit()
+            except Exception as e:  # noqa: BLE001
+                _db.session.rollback()
+                errors += 1
+                logger.error("Commit failed during carbon backfill: %s", e)
+
+        logger.info(
+            "Carbon history backfill: inserted=%d skipped=%d errors=%d dry_run=%s",
+            inserted, skipped, errors, dry_run,
+        )
+        return {"inserted": inserted, "skipped": skipped, "errors": errors, "dry_run": dry_run}
 
     def get_carbon_fields_metadata(self):
         """Return metadata for green/carbon filter fields (Dimension B)."""

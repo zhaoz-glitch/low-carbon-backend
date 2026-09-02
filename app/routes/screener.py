@@ -16,6 +16,7 @@ from app.services.carbon_service import carbon_service
 from app.services.screener_service import screener_service
 from app.utils.csv_export import generate_csv
 from app.utils.auth import login_required
+from app.utils.filter_validation import validate_filters
 from app.models.preset_template import PresetTemplate
 from app.extensions import db
 
@@ -75,7 +76,13 @@ def run_screener():
     }
     """
     data = request.get_json(silent=True) or {}
-    filters = data.get("filters", {})
+    raw_filters = data.get("filters", {})
+
+    # Validate and normalize numeric inputs (reject "abc", unify "10%"/"0.1").
+    try:
+        filters = validate_filters(raw_filters)
+    except ValueError as e:
+        return jsonify({"error": "Invalid filter value", "message": str(e)}), 400
 
     # Pagination
     page = max(1, data.get("page", 1))
@@ -117,7 +124,13 @@ def export_screener():
     pagination limit for the file).
     """
     data = request.get_json(silent=True) or {}
-    filters = data.get("filters", {})
+    raw_filters = data.get("filters", {})
+
+    try:
+        filters = validate_filters(raw_filters)
+    except ValueError as e:
+        return jsonify({"error": "Invalid filter value", "message": str(e)}), 400
+
     sort_by = data.get("sortBy", "market_cap_basic")
     sort_order = data.get("sortOrder", "desc")
 
