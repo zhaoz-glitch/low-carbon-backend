@@ -6,6 +6,7 @@ Endpoints:
 """
 
 import logging
+import urllib.parse
 from flask import Blueprint, jsonify
 
 from app.models.company import Company
@@ -29,7 +30,10 @@ def get_stock_detail(symbol):
       - Carbon emission history trend (5-year Scope 1+2)
       - Data source & report year annotation
     """
-    symbol = symbol.upper().strip()
+    # The frontend double-encodes slashes so that %2F is not decoded by
+    # upstream proxies into a path separator.  Unquote once here to restore
+    # the original symbol, e.g. "BML/PJ".
+    symbol = urllib.parse.unquote(symbol).upper().strip()
 
     company = Company.query.filter_by(symbol=symbol).first()
     if not company:
@@ -70,7 +74,7 @@ def get_carbon_trend_endpoint(symbol):
     Provides data for the recharts trend chart showing Scope 1+2 emissions
     and carbon intensity changes over the past 5 years.
     """
-    symbol = symbol.upper().strip()
+    symbol = urllib.parse.unquote(symbol).upper().strip()
 
     company = Company.query.filter_by(symbol=symbol).first()
     if not company:
