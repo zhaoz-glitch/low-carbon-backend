@@ -44,9 +44,12 @@ class ScreenerService:
     }
 
     SORT_FIELD_MAP = {
+        "symbol": Company.symbol,
+        "sector": Company.sector,
         "market_cap_basic": FinancialMetric.market_cap,
         "close": FinancialMetric.close,
         "price_earnings_ttm": FinancialMetric.pe_ttm,
+        "price_book_value": FinancialMetric.pb,
         "turnover": FinancialMetric.turnover,
         "dividend_yield_recent": FinancialMetric.dividend_yield,
         "carbon_intensity_revenue": CarbonEmission.carbon_intensity_revenue,
@@ -197,6 +200,10 @@ class ScreenerService:
             query = query.order_by(sort_col.asc())
         else:
             query = query.order_by(sort_col.desc())
+
+        # Stable ordering: tie-break by symbol so pagination is deterministic.
+        if sort_by != "symbol":
+            query = query.order_by(Company.symbol.asc())
 
         # --- Pagination ---
         offset = (page - 1) * page_size
