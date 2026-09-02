@@ -229,7 +229,10 @@ def reset_password():
 
     Request body::
 
-        {"email": "user@example.com", "code": "123456", "password": "new-secret"}
+        {"email": "user@example.com", "code": "123456", "new_password": "new-secret"}
+
+    ``new_password`` is preferred; ``password`` is accepted for backward
+    compatibility.
 
     The code is single-use: redeeming it invalidates every outstanding code
     for the account, and after success the user logs in with the new
@@ -238,7 +241,7 @@ def reset_password():
     data = request.get_json(silent=True) or {}
     email = (data.get("email") or "").strip().lower()
     code = (data.get("code") or "").strip()
-    password = data.get("password") or ""
+    password = data.get("new_password") or data.get("password") or ""
 
     if not email or not _EMAIL_RE.match(email):
         return jsonify({"error": "请输入有效的邮箱地址"}), 400
