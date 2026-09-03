@@ -46,15 +46,18 @@ class ScreenerService:
     SORT_FIELD_MAP = {
         "symbol": Company.symbol,
         "sector": Company.sector,
-        "market_cap_basic": FinancialMetric.market_cap,
         "close": FinancialMetric.close,
+        "market_cap_basic": FinancialMetric.market_cap,
         "price_earnings_ttm": FinancialMetric.pe_ttm,
         "price_book_value": FinancialMetric.pb,
-        "turnover": FinancialMetric.turnover,
         "dividend_yield_recent": FinancialMetric.dividend_yield,
+        "turnover": FinancialMetric.turnover,
+        "volume": FinancialMetric.volume,
+        "change_1_year": FinancialMetric.week_52_change,
+        "net_margin": FinancialMetric.net_profit_margin,
         "carbon_intensity_revenue": CarbonEmission.carbon_intensity_revenue,
-        "carbon_change_yoy": CarbonEmission.carbon_change_yoy,
         "total_emissions": CarbonEmission.total_emissions,
+        "carbon_change_yoy": CarbonEmission.carbon_change_yoy,
     }
 
     def run_screener(self, filters, page=1, page_size=50,
