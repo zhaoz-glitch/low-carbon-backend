@@ -188,15 +188,32 @@ def export_screener():
             chart_dir = tmp / "charts"
             chart_dir.mkdir()
 
+            chart_count = 0
             for row in rows:
                 sym = row.get("symbol")
-                if sym:
-                    generate_carbon_trend_chart(sym, chart_dir)
+                if sym and generate_carbon_trend_chart(sym, chart_dir):
+                    chart_count += 1
+
+            pngs = sorted(chart_dir.glob("*.png"))
+            if not pngs:
+                logger.warning(
+                    "Export requested charts but none generated (%d rows)", len(rows)
+                )
+                return (
+                    jsonify({
+                        "error": "Chart generation failed",
+                        "message": (
+                            "No 5-year carbon trend data found for the selected stocks. "
+                            "Export the CSV without charts instead."
+                        ),
+                    }),
+                    502,
+                )
 
             zip_buffer = io.BytesIO()
             with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                 zf.write(csv_path, arcname="screener_export.csv")
-                for png in chart_dir.glob("*.png"):
+                for png in pngs:
                     zf.write(png, arcname=f"charts/{png.name}")
 
             zip_buffer.seek(0)

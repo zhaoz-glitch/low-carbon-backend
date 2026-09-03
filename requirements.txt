@@ -13,3 +13,4 @@ gunicorn==23.0.0
 PyMySQL==1.1.1
 cryptography==43.0.3
 psycopg2-binary==2.9.10
+matplotlib==3.11.1

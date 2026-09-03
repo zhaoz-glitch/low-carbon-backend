@@ -48,11 +48,13 @@ def generate_carbon_trend_chart(symbol: str, output_dir: Path) -> Path | None:
 
         years = [t["report_year"] for t in trend]
         emissions = [
-            float(t["total_emissions"]) if t["total_emissions"] is not None else 0
+            float(t["total_emissions"]) if t.get("total_emissions") is not None else 0
             for t in trend
         ]
+        # CarbonEmission.to_dict() exposes the intensity under
+        # carbon_intensity_revenue; accept carbon_intensity as an alias.
         intensity = [
-            float(t["carbon_intensity"]) if t["carbon_intensity"] is not None else 0
+            float(t.get("carbon_intensity_revenue") or t.get("carbon_intensity") or 0)
             for t in trend
         ]
 
