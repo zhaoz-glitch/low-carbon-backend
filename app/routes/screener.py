@@ -117,14 +117,28 @@ def run_screener():
 @screener_bp.route("/screener/export", methods=["POST"])
 @login_required
 def export_screener():
-    """Export screening results as a CSV file.
+    """Export screening results as CSV (or ZIP with charts).
 
-    Reuses the same filter logic as /screener/run but returns a CSV
-    download instead of JSON. All matching results are exported (no
-    pagination limit for the file).
+    Reuses the same filter logic as /screener/run but returns a file
+    download instead of JSON.  All matching results are exported (no
+    pagination limit).
+
+    Optional body fields:
+      - symbols: list of specific symbols to export (filters applied first)
+      - includeCharts: bool — when true, generates 5-year carbon trend
+        PNGs for each exported stock and returns a ZIP archive.
     """
+    import io
+    import zipfile
+    import tempfile
+    from pathlib import Path
+
+    from app.utils.chart_export import generate_carbon_trend_chart
+
     data = request.get_json(silent=True) or {}
     raw_filters = data.get("filters", {})
+    symbols = data.get("symbols")
+    include_charts = bool(data.get("includeCharts"))
 
     try:
         filters = validate_filters(raw_filters)
@@ -139,22 +153,62 @@ def export_screener():
         result = screener_service.run_screener(
             filters=filters,
             page=1,
-            page_size=10000,  # export all
+            page_size=10000,
             sort_by=sort_by,
             sort_order=sort_order,
         )
 
-        csv_content = generate_csv(result["data"])
+        rows = result["data"]
 
-        return Response(
-            csv_content,
-            mimetype="text/csv",
-            headers={
-                "Content-Disposition": "attachment; filename=low_carbon_screener_export.csv",
-            },
-        )
+        # If explicit symbol list provided, filter to those symbols
+        if symbols and isinstance(symbols, list):
+            symbol_set = {s.upper().strip() for s in symbols if isinstance(s, str)}
+            rows = [r for r in rows if r.get("symbol", "").upper() in symbol_set]
+
+        if not rows:
+            return jsonify({"error": "No matching stocks to export"}), 400
+
+        csv_content = generate_csv(rows)
+
+        if not include_charts:
+            return Response(
+                csv_content,
+                mimetype="text/csv",
+                headers={
+                    "Content-Disposition": "attachment; filename=low_carbon_screener_export.csv",
+                },
+            )
+
+        # Generate ZIP with CSV + chart PNGs
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            csv_path = tmp / "screener_export.csv"
+            csv_path.write_text(csv_content, encoding="utf-8")
+
+            chart_dir = tmp / "charts"
+            chart_dir.mkdir()
+
+            for row in rows:
+                sym = row.get("symbol")
+                if sym:
+                    generate_carbon_trend_chart(sym, chart_dir)
+
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.write(csv_path, arcname="screener_export.csv")
+                for png in chart_dir.glob("*.png"):
+                    zf.write(png, arcname=f"charts/{png.name}")
+
+            zip_buffer.seek(0)
+            return Response(
+                zip_buffer.getvalue(),
+                mimetype="application/zip",
+                headers={
+                    "Content-Disposition": "attachment; filename=low_carbon_screener_export.zip",
+                },
+            )
     except Exception as e:
-        logger.error("CSV export failed: %s", e, exc_info=True)
+        logger.error("Export failed: %s", e, exc_info=True)
         return jsonify({"error": "Export failed", "message": str(e)}), 500
 
 
