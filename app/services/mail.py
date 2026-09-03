@@ -38,7 +38,21 @@ def _resend_configured(app) -> bool:
 def _send_via_resend(app, to: str, subject: str, html: str, text: str) -> bool:
     """POST to Resend's REST API.  Returns True on 2xx."""
     from_name = app.config.get("MAIL_FROM_NAME") or "低碳价值筛选器"
-    from_addr = app.config.get("MAIL_FROM") or "onboarding@resend.dev"
+    from_addr = app.config.get("MAIL_FROM") or ""
+
+    # Resend free tier requires the sender domain to be verified.
+    # If a custom from address is used without verification, Resend
+    # silently drops emails to arbitrary recipients. Fallback to the
+    # shared onboarding address so delivery actually works.
+    if not from_addr.endswith("@resend.dev"):
+        if from_addr:
+            logger.warning(
+                "MAIL_FROM (%s) is not a verified Resend domain; "
+                "falling back to onboarding@resend.dev",
+                from_addr,
+            )
+        from_addr = "onboarding@resend.dev"
+
     payload = json.dumps({
         "from": formataddr((from_name, from_addr)),
         "to": [to],

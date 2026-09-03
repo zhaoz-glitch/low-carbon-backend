@@ -184,7 +184,9 @@ def forgot_password():
     )
     db.session.commit()
 
-    send_password_reset_code(email, code)
+    sent = send_password_reset_code(email, code)
+    if not sent:
+        return jsonify({"error": "邮件发送失败，请稍后重试"}), 502
     logger.info("Password reset code issued for %s", email)
     return jsonify({"message": "验证码已发送到你的邮箱"}), 200
 

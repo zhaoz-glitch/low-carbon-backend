@@ -14,7 +14,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_FROM = "低碳价值筛选器 <noreply@lowcarbon.io>"
+DEFAULT_FROM = "onboarding@resend.dev"
 
 
 def generate_reset_code() -> str:
