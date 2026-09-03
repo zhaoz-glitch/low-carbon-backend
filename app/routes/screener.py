@@ -16,7 +16,7 @@ from app.services.carbon_service import carbon_service
 from app.services.screener_service import screener_service
 from app.utils.csv_export import generate_csv
 from app.utils.auth import login_required
-from app.utils.filter_validation import validate_filters
+from app.utils.filter_validation import validate_filters, template_filters_to_api
 from app.models.preset_template import PresetTemplate
 from app.extensions import db
 
@@ -158,13 +158,20 @@ def export_screener():
         return jsonify({"error": "Export failed", "message": str(e)}), 500
 
 
+def _serialize_template(tpl: PresetTemplate) -> dict:
+    """Serve template filters in the API's fraction convention for percent fields."""
+    d = tpl.to_dict()
+    d["filters"] = template_filters_to_api(d.get("filters"))
+    return d
+
+
 @screener_bp.route("/screener/templates", methods=["GET"])
 @login_required
 def get_templates():
     """List all preset filter templates (PRD section 3.2)."""
     templates = PresetTemplate.query.filter_by(is_active=True).all()
     return jsonify({
-        "templates": [t.to_dict() for t in templates],
+        "templates": [_serialize_template(t) for t in templates],
     })
 
 
@@ -173,4 +180,4 @@ def get_templates():
 def get_template(template_id):
     """Get a single preset template by ID."""
     tpl = PresetTemplate.query.get_or_404(template_id)
-    return jsonify(tpl.to_dict())
+    return jsonify(_serialize_template(tpl))
