@@ -119,7 +119,8 @@ def backfill_carbon_history():
         {
             "year_start": 2020,      # first historical year (inclusive)
             "year_end":   2025,      # last historical year (inclusive, before latest)
-            "dry_run":    false      # when true, compute but roll back
+            "dry_run":    false,     # when true, compute but roll back
+            "delete_mock": false     # when true, remove stale mock rows first
         }
 
     Returns ``{ok, returncode, duration_s, summary, stderr_tail}``.
@@ -131,6 +132,7 @@ def backfill_carbon_history():
     year_start = int(body.get("year_start", 2020))
     year_end = int(body.get("year_end", 2025))
     dry_run = bool(body.get("dry_run", False))
+    delete_mock = bool(body.get("delete_mock", False))
 
     if year_start > year_end:
         return jsonify({"error": "year_start must be <= year_end"}), 400
@@ -140,6 +142,8 @@ def backfill_carbon_history():
             "--year-end",   str(year_end)]
     if dry_run:
         args.append("--dry-run")
+    if delete_mock:
+        args.append("--delete-mock")
 
     rc, out, err, secs = _run_subprocess(args, timeout=600)
     summary = _last_matching(out, "BACKFILL_RESULT") or _last_matching(err, "BACKFILL_RESULT")

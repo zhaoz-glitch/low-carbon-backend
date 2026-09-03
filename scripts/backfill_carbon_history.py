@@ -38,7 +38,7 @@ logging.basicConfig(
 logger = logging.getLogger("carbon_backfill")
 
 
-def run(year_start: int, year_end: int, dry_run: bool) -> dict:
+def run(year_start: int, year_end: int, dry_run: bool, delete_mock: bool) -> dict:
     from app import create_app
     from app.services.carbon_service import carbon_service
 
@@ -46,6 +46,7 @@ def run(year_start: int, year_end: int, dry_run: bool) -> dict:
     with app.app_context():
         result = carbon_service.backfill_history(
             year_start=year_start, year_end=year_end, dry_run=dry_run,
+            delete_mock=delete_mock,
         )
     return result
 
@@ -58,6 +59,8 @@ def main():
                         help="Last historical year to fill (inclusive, before latest). Default: 2025")
     parser.add_argument("--dry-run", action="store_true",
                         help="Compute everything but roll back instead of committing.")
+    parser.add_argument("--delete-mock", action="store_true",
+                        help="Remove data_source='mock' rows before backfilling.")
     args = parser.parse_args()
 
     if args.year_start > args.year_end:
@@ -70,7 +73,7 @@ def main():
         logger.info("Starting backfill (years %d..%d, dry_run=%s)",
                     args.year_start, args.year_end, args.dry_run)
 
-    result = run(args.year_start, args.year_end, args.dry_run)
+    result = run(args.year_start, args.year_end, args.dry_run, args.delete_mock)
     logger.info("Backfill summary: %s", result)
     # Print a single line that admin.py can grep for the status block
     print(f"BACKFILL_RESULT inserted={result['inserted']} "

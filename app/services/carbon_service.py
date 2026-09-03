@@ -290,7 +290,7 @@ class CarbonService:
         db.session.commit()
         return True
 
-    def backfill_history(self, year_start=2020, year_end=2025, dry_run=False):
+    def backfill_history(self, year_start=2020, year_end=2025, dry_run=False, delete_mock=False):
         """Generate historical carbon rows for symbols that lack them.
 
         For each symbol that has a ``latest_year`` row but is missing one
@@ -316,6 +316,11 @@ class CarbonService:
         from app.models.company import Company
 
         latest_year = datetime.now().year  # 2026
+
+        if delete_mock:
+            mock_deleted = CarbonEmission.query.filter_by(data_source="mock").delete()
+            _db.session.commit()
+            logger.info("Deleted %d stale mock carbon rows before backfill", mock_deleted)
 
         latest_rows = CarbonEmission.query.filter_by(report_year=latest_year).all()
         if not latest_rows:
