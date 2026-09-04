@@ -123,27 +123,61 @@ def run_etl(min_revenue: float = 0.0, dry_run: bool = False) -> dict:
 
         # --- compute emissions locally ---
         year = datetime.now().year
+
+        # Previous report year history — the spend-based estimate cannot
+        # provide YoY metrics directly, so derive them from what we already
+        # store: carbon_change_yoy = (I_y - I_{y-1}) / I_{y-1} and
+        # revenue_growth = (rev_y - rev_{y-1}) / rev_{y-1}.
+        prev_year = {
+            ce.symbol: (ce.carbon_intensity_revenue, ce.revenue)
+            for ce in db.session.query(
+                CarbonEmission.symbol,
+                CarbonEmission.carbon_intensity_revenue,
+                CarbonEmission.revenue,
+            ).filter(CarbonEmission.report_year == year - 1).all()
+        }
+
         carbon_rows = []
         for r in rows:
             entry = factors.get(r["sector"])
             if not entry:
                 continue
             total_t = r["revenue"] * entry["factor_kg_per_usd"] / 1000.0
+            intensity = round(entry["factor_kg_per_usd"] * 1000.0, 4)
+            prev_ci, prev_rev = prev_year.get(r["symbol"], (None, None))
+            prev_ci = float(prev_ci) if prev_ci is not None else None
+            yoy = (
+                round((intensity - prev_ci) / prev_ci * 100, 2)
+                if prev_ci
+                else None
+            )
             carbon_rows.append({
                 "symbol": r["symbol"],
                 "report_year": year,
                 "scope1": None,
                 "scope2": None,
                 "total_emissions": round(total_t, 2),
-                "carbon_intensity_revenue": round(
-                    entry["factor_kg_per_usd"] * 1000.0, 4
-                ),
-                "carbon_change_yoy": None,
+                "carbon_intensity_revenue": intensity,
+                "carbon_change_yoy": yoy,
                 "revenue": round(r["revenue"], 2),
                 "data_source": "climatiq",
                 "has_carbon_data": True,
             })
         logger.info("computed %d carbon estimates", len(carbon_rows))
+
+        # Revenue growth vs the previous report year, per symbol.
+        rev_growth = {
+            r["symbol"]: round(
+                (r["revenue"] - float(prev_year[r["symbol"]][1]))
+                / float(prev_year[r["symbol"]][1]) * 100, 2
+            )
+            for r in rows
+            if r["symbol"] in prev_year and prev_year[r["symbol"]][1]
+        }
+        logger.info(
+            "revenue_growth computable for %d symbols (prev year %d)",
+            len(rev_growth), year - 1,
+        )
 
         if dry_run:
             top = sorted(
@@ -178,12 +212,21 @@ def run_etl(min_revenue: float = 0.0, dry_run: bool = False) -> dict:
             ).filter(FinancialMetric.date == today).all()
         }
         rev_updates = [
-            {"id": existing_today[r["symbol"]], "revenue": r["revenue"]}
+            {
+                "id": existing_today[r["symbol"]],
+                "revenue": r["revenue"],
+                **({"revenue_growth": rev_growth[r["symbol"]]}
+                   if r["symbol"] in rev_growth else {}),
+            }
             for r in rows
             if r["symbol"] in existing_today
         ]
         rev_inserts = [
-            {"symbol": r["symbol"], "date": today, "revenue": r["revenue"]}
+            {
+                "symbol": r["symbol"], "date": today,
+                "revenue": r["revenue"],
+                "revenue_growth": rev_growth.get(r["symbol"]),
+            }
             for r in rows if r["symbol"] not in existing_today
         ]
         if rev_updates:
