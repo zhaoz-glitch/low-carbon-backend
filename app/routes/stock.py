@@ -8,7 +8,9 @@ Endpoints:
 import logging
 import urllib.parse
 from flask import Blueprint, jsonify
+from sqlalchemy import func
 
+from app.extensions import db
 from app.models.company import Company
 from app.models.financial_metric import FinancialMetric
 from app.models.carbon_emission import CarbonEmission
@@ -18,6 +20,61 @@ from app.utils.mock_data import get_carbon_trend
 logger = logging.getLogger(__name__)
 
 stock_bp = Blueprint("stock", __name__)
+
+
+def _attach_carbon_baselines(symbol, history):
+    """Attach per-year US-market & sector-average baselines to a trend series.
+
+    Each baseline is the *cross-sectional simple average* of
+    ``carbon_intensity_revenue`` for the report year, computed over every
+    company that actually has a value that year.  Companies whose intensity
+    is NULL never enter the statistic — they are filtered out rather than
+    counted as zero (avoiding downward bias from non-disclosers).
+
+    Mutates each point dict with:
+      - us_avg_intensity / us_peer_count      (whole covered US universe)
+      - sector_avg_intensity / sector_peer_count  (same-year, company's sector)
+
+    Any year without peers (or a company without a sector) yields NULL so the
+    frontend can simply skip that point on the reference line.
+    """
+    if not history:
+        return history
+
+    company = Company.query.filter_by(symbol=symbol).first()
+    years = [p["report_year"] for p in history]
+
+    def _agg(extra_filter):
+        rows = (
+            db.session.query(
+                CarbonEmission.report_year,
+                func.avg(CarbonEmission.carbon_intensity_revenue),
+                func.count(CarbonEmission.carbon_intensity_revenue),
+            )
+            .join(Company, Company.symbol == CarbonEmission.symbol)
+            .filter(
+                CarbonEmission.report_year.in_(years),
+                CarbonEmission.carbon_intensity_revenue.isnot(None),
+            )
+        )
+        if extra_filter is not None:
+            rows = rows.filter(extra_filter)
+        return {
+            y: (float(a) if a is not None else None, n)
+            for y, a, n in rows.group_by(CarbonEmission.report_year).all()
+        }
+
+    market = _agg(None)
+    sector = _agg(Company.sector == company.sector) if company and company.sector else {}
+
+    for point in history:
+        y = point["report_year"]
+        m, s = market.get(y), sector.get(y)
+        point["us_avg_intensity"] = round(m[0], 4) if m and m[0] is not None else None
+        point["us_peer_count"] = m[1] if m else None
+        point["sector_avg_intensity"] = round(s[0], 4) if s and s[0] is not None else None
+        point["sector_peer_count"] = s[1] if s else None
+    return history
 
 
 @stock_bp.route("/stock/<string:symbol>", methods=["GET"])
@@ -55,8 +112,8 @@ def get_stock_detail(symbol):
         .first()
     )
 
-    # 5-year carbon history for the trend chart
-    carbon_history = get_carbon_trend(symbol)
+    # 5-year carbon history for the trend chart (+ US/sector baselines)
+    carbon_history = _attach_carbon_baselines(symbol, get_carbon_trend(symbol))
 
     return jsonify({
         "company": company.to_dict(),
@@ -80,7 +137,7 @@ def get_carbon_trend_endpoint(symbol):
     if not company:
         return jsonify({"error": "Stock not found", "symbol": symbol}), 404
 
-    trend_data = get_carbon_trend(symbol)
+    trend_data = _attach_carbon_baselines(symbol, get_carbon_trend(symbol))
 
     return jsonify({
         "symbol": symbol,
