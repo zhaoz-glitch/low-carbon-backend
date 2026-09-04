@@ -39,7 +39,10 @@ logger = logging.getLogger("carbon_etl")
 MAX_SYMBOL_LEN = 10
 MAX_SECTOR_LEN = 100
 
-TV_COLUMNS = ["name", "type", "sector", "total_revenue", "market_cap_basic"]
+TV_COLUMNS = [
+    "name", "type", "sector", "total_revenue", "market_cap_basic",
+    "description",
+]
 
 
 def fetch_universe() -> pd.DataFrame:
@@ -101,6 +104,9 @@ def run_etl(min_revenue: float = 0.0, dry_run: bool = False) -> dict:
                 "symbol": symbol,
                 "sector": _clean(rec.get("sector"), MAX_SECTOR_LEN) or "Other",
                 "revenue": revenue,
+                # companies.name is NOT NULL — TV "description" is the
+                # company display name; fall back to the ticker.
+                "name": _clean(rec.get("description"), 200) or symbol,
             })
         logger.info("normalized %d companies with revenue data", len(rows))
 
@@ -196,7 +202,11 @@ def run_etl(min_revenue: float = 0.0, dry_run: bool = False) -> dict:
             for c in db.session.query(Company.symbol).all()
         }
         missing = [
-            {"symbol": r["symbol"], "sector": r["sector"]}
+            {
+                "symbol": r["symbol"],
+                "sector": r["sector"],
+                "name": r["name"],
+            }
             for r in rows if r["symbol"] not in known
         ]
         if missing:
