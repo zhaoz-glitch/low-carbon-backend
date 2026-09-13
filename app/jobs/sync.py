@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from flask import current_app
 
@@ -58,12 +58,20 @@ def recover_stale_jobs(minutes: int = 0):
 
 
 def upsert_financial_rows(rows: list[dict]) -> int:
-    """Insert or update financial_metrics by (symbol, date)."""
+    """Insert or update financial_metrics by (symbol, date).
+
+    TradingView rows carry no explicit date (the snapshot is "now"), so a
+    missing ``date`` defaults to today — previously those rows were silently
+    skipped, freezing prices at the last full ETL run.
+    """
     count = 0
+    today = date.today()
     for row in rows:
         symbol = row.get("symbol")
-        as_of = row.get("date")
-        if not symbol or not as_of:
+        as_of = row.get("date") or today
+        if isinstance(as_of, str):
+            as_of = date.fromisoformat(as_of)
+        if not symbol:
             continue
         if Company.query.filter_by(symbol=symbol).first() is None:
             continue
