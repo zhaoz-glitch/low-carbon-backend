@@ -103,6 +103,7 @@ def run_screener():
         maybe_refresh_live_quotes()
         result = screener_service.run_screener(
             filters=filters,
+            search_query=data.get("query"),
             page=page,
             page_size=page_size,
             sort_by=sort_by,
@@ -152,6 +153,7 @@ def export_screener():
         # Fetch all results (large page size for export)
         result = screener_service.run_screener(
             filters=filters,
+            search_query=data.get("query"),
             page=1,
             page_size=10000,
             sort_by=sort_by,

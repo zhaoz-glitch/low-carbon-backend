@@ -60,12 +60,13 @@ class ScreenerService:
         "carbon_change_yoy": CarbonEmission.carbon_change_yoy,
     }
 
-    def run_screener(self, filters, page=1, page_size=50,
+    def run_screener(self, filters, search_query=None, page=1, page_size=50,
                      sort_by="market_cap_basic", sort_order="desc"):
         """Execute the screening pipeline.
 
         Args:
             filters: dict of filter conditions (see PRD section 4.2)
+            search_query: optional free-text search against symbol/name
             page: page number (1-indexed)
             page_size: results per page
             sort_by: field to sort by
@@ -74,7 +75,7 @@ class ScreenerService:
         Returns:
             dict with total, page, pageSize, data list
         """
-        logger.info("Running screener with filters=%s, page=%s", filters, page)
+        logger.info("Running screener with filters=%s, search_query=%s, page=%s", filters, search_query, page)
 
         # Separate financial filters from carbon filters
         financial_filters = {}
@@ -192,6 +193,12 @@ class ScreenerService:
         elif has_carbon_filter == "true":
             query = query.filter(CarbonEmission.carbon_intensity_revenue.isnot(None))
 
+        # --- Free-text search by symbol or company name ---
+        if search_query is not None and isinstance(search_query, str):
+            search_query = search_query.strip()
+        if search_query:
+            query = self._apply_text_search(search_query, query)
+
         # --- Count total (before pagination) ---
         # Use a subquery to count distinct symbols
         count_subq = query.with_entities(Company.symbol).distinct().subquery()
@@ -227,6 +234,29 @@ class ScreenerService:
             "pageSize": page_size,
             "data": data,
         }
+
+    def _apply_text_search(self, search_query: str, query):
+        """Filter a query by free-text symbol/name search.
+
+        Multiple space-separated tokens are AND-ed together. Each token must
+        match either the company symbol or the company name (case-insensitive).
+        """
+        tokens = [t.strip() for t in search_query.split() if t.strip()]
+        if not tokens:
+            return query
+
+        conditions = []
+        for token in tokens:
+            pattern = f"%{token}%"
+            # Use lower() for case-insensitive matching that works on SQLite
+            # (which lacks native ilike) and MySQL alike.
+            conditions.append(
+                or_(
+                    func.lower(Company.symbol).like(func.lower(pattern)),
+                    func.lower(Company.name).like(func.lower(pattern)),
+                )
+            )
+        return query.filter(and_(*conditions))
 
     def _format_result_row(self, row):
         """Convert a SQLAlchemy result row to a dict."""
