@@ -70,22 +70,15 @@ def main(dry_run: bool):
                 growth[symbol] = round((years[y_new] - prev_rev) / prev_rev * 100, 2)
         logger.info("revenue_growth computable for %d symbols", len(growth))
 
-        # Latest financial row per symbol (max date).
-        latest_ids = {}
-        q = db.session.query(
-            FinancialMetric.id, FinancialMetric.symbol, FinancialMetric.date
-        ).order_by(FinancialMetric.date.desc())
-        for fid, symbol, _date in q:
-            if symbol not in latest_ids:
-                latest_ids[symbol] = fid
-
+        # financial_metrics holds exactly one snapshot row per symbol now.
+        known = {s for (s,) in db.session.query(FinancialMetric.symbol).all()}
         updates = [
-            {"id": fid, "revenue_growth": growth[symbol]}
-            for symbol, fid in latest_ids.items()
-            if symbol in growth
+            {"symbol": symbol, "revenue_growth": value}
+            for symbol, value in growth.items()
+            if symbol in known
         ]
         logger.info(
-            "financial_metrics.revenue_growth: %d latest rows to update "
+            "financial_metrics.revenue_growth: %d snapshot rows to update "
             "(dry_run=%s)", len(updates), dry_run,
         )
 
@@ -96,8 +89,9 @@ def main(dry_run: bool):
             return
 
         if updates:
-            db.session.bulk_update_mappings(FinancialMetric, updates)
-        db.session.commit()
+            from app.services.market_snapshot_service import market_snapshot_service
+
+            market_snapshot_service.upsert(updates, source="backfill-derived")
         logger.info("backfill committed")
 
 

@@ -96,13 +96,15 @@ class ScreenerService:
                 carbon_filters[key] = value
 
         # --- Build base query ---
-        # Company + latest FinancialMetric (via correlated subquery)
+        # Company identity + its single financial snapshot row.  There is no
+        # longer a "pick the latest of N dated rows" step: financial_metrics
+        # holds exactly one row per symbol (uq_financial_metrics_symbol).
         query = (
             db.session.query(
                 Company.symbol,
                 Company.name,
                 Company.sector,
-                FinancialMetric.date.label("market_date"),
+                FinancialMetric.as_of_date.label("market_date"),
                 FinancialMetric.close,
                 FinancialMetric.pe_ttm,
                 FinancialMetric.turnover,
@@ -122,16 +124,6 @@ class ScreenerService:
             )
             .join(FinancialMetric, Company.symbol == FinancialMetric.symbol)
         )
-
-        # --- Filter: only latest financial record per symbol (correlated subquery) ---
-        # Use aliased model to avoid self-correlation issues in SQLAlchemy.
-        FM = aliased(FinancialMetric)
-        latest_fin_date = (
-            db.session.query(func.max(FM.date))
-            .filter(FM.symbol == Company.symbol)
-            .scalar_subquery()
-        )
-        query = query.filter(FinancialMetric.date == latest_fin_date)
 
         # --- JOIN carbon data ---
         use_inner = has_carbon_filter == "true" and not include_no_carbon_data

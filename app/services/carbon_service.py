@@ -639,11 +639,7 @@ class CarbonService:
             company = Company.query.filter_by(symbol=symbol).first()
             if not company:
                 return None
-            fm = (
-                FinancialMetric.query.filter_by(symbol=symbol)
-                .order_by(FinancialMetric.date.desc())
-                .first()
-            )
+            fm = FinancialMetric.query.filter_by(symbol=symbol).first()
             revenue = float(fm.revenue) if fm and fm.revenue else None
             if not revenue:
                 logger.info(

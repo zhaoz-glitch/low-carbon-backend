@@ -99,6 +99,49 @@ def run_etl():
     return jsonify(results), (200 if results["ok"] else 500)
 
 
+@admin_bp.route("/admin/refactor-snapshot", methods=["POST"])
+def refactor_snapshot():
+    """Collapse ``financial_metrics`` to one row per company and drop the
+    duplicated ``companies.market_cap`` column.
+
+    Body (JSON, all optional):
+        {"apply": false}   # false = dry-run report only (default)
+
+    Safe to call repeatedly: after a successful run it just reports state.
+    """
+    if not _check_token():
+        return jsonify({"error": "forbidden"}), 403
+
+    body = request.get_json(silent=True) or {}
+    apply = bool(body.get("apply", False))
+
+    args = [sys.executable, "scripts/refactor_financial_snapshot.py"]
+    args.append("--apply" if apply else "--dry-run")
+
+    rc, out, err, secs = _run_subprocess(args, timeout=900)
+    summary = _last_matching(out, "REFACTOR_REPORT") or _last_matching(err, "REFACTOR_REPORT")
+
+    return jsonify({
+        "ok": rc in (0, 2),
+        "returncode": rc,
+        "duration_s": round(secs, 1),
+        "apply": apply,
+        "summary": summary,
+        "stderr_tail": err[-1500:] if err else "",
+    }), (200 if rc in (0, 2) else 500)
+
+
+@admin_bp.route("/admin/snapshot-coverage", methods=["GET"])
+def snapshot_coverage():
+    """Report fill rates of the financial snapshot table (token required)."""
+    if not _check_token():
+        return jsonify({"error": "forbidden"}), 403
+
+    from app.services.market_snapshot_service import market_snapshot_service
+
+    return jsonify(market_snapshot_service.coverage())
+
+
 @admin_bp.route("/admin/status", methods=["GET"])
 def admin_status():
     """Cheap health check (no token required) for cron monitoring."""

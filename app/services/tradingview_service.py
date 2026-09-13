@@ -10,27 +10,34 @@ required).  Field names map 1:1 to TradingView screener columns:
     price_earnings_ttm        → pe_ttm
     price_book_fq             → pb
     dividends_yield           → dividend_yield
-    turnover                  → turnover
-    change_1_year             → week_52_change
     net_margin                → net_profit_margin
+    total_revenue             → revenue
     close / volume            → close / volume
+    Perf.Y                    → week_52_change      (52-week performance %)
+    volume / float_shares     → turnover            (derived, see _normalize)
 
 The service is best-effort: any failure (package missing, network error,
 TradingView unreachable) falls back to ``None`` so the caller transparently
 uses the local database (seeded by ``mock_data.py``).
 
-Note: TradingView renamed scanner fields in 2026 — ``price_book_value`` →
-``price_book_fq`` and ``dividend_yield_recent`` → ``dividends_yield``.
-The old names now return null, so only the new names are used below.
+Retired upstream fields (2026) — verified 0/10 non-null across a sample, so
+they are no longer requested:
+
+    price_book_value     → renamed to price_book_fq
+    dividend_yield_recent→ renamed to dividends_yield
+    turnover             → scanner no longer returns it; derived from
+                           volume / float_shares_outstanding instead
+    change_1_year        → scanner no longer returns it; replaced by Perf.Y
 
 Docs: https://github.com/shner-elmo/TradingView-Screener
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
+
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +50,11 @@ TV_COLUMNS = [
     "price_earnings_ttm",
     "price_book_fq",
     "dividends_yield",
-    "turnover",
-    "change_1_year",
     "net_margin",
     "total_revenue",
     "sector",
+    "float_shares_outstanding",
+    "Perf.Y",
 ]
 
 COLUMN_MAP = {
@@ -55,9 +62,17 @@ COLUMN_MAP = {
     "price_earnings_ttm": "pe_ttm",
     "price_book_fq": "pb",
     "dividends_yield": "dividend_yield",
-    "change_1_year": "week_52_change",
     "net_margin": "net_profit_margin",
     "total_revenue": "revenue",
+    "Perf.Y": "week_52_change",
+}
+
+# First alias listed is preferred; the rest are fallbacks kept for when the
+# scanner starts answering on an older name again.
+FIELD_FALLBACKS = {
+    "pb": ("price_book_fq", "price_book_value"),
+    "dividend_yield": ("dividends_yield", "dividend_yield_recent"),
+    "week_52_change": ("Perf.Y", "change_1_year"),
 }
 
 # Legacy frontend/API filter keys → current TradingView scanner columns.
@@ -86,13 +101,14 @@ class TradingViewService:
     # Public API
     # ------------------------------------------------------------------
 
-    def fetch_financial_data(self, symbols=None, filters=None, allow_tvkit=True):
-        """Fetch metrics for *symbols* (default: screener universe).
+    def fetch_financial_data(self, symbols=None, filters=None, types="stock"):
+        """Fetch metrics for *symbols*, or the whole US market when omitted.
 
         Args:
-            symbols: list of ticker symbols, or None for the default universe
+            symbols: list of ticker symbols, or None for the full US market
             filters: optional dict of TradingView screener filters
                      (column → (op, value))
+            types: symbol type for the full-market scan (``stock`` / ``all``)
 
         Returns:
             list of dicts with FinancialMetric-schema fields,
@@ -110,7 +126,10 @@ class TradingViewService:
                 return self._cache[cache_key]["data"]
 
         try:
-            rows = self._query_scanner(symbols, filters)
+            if symbols:
+                rows = self._query_scanner(symbols, filters)
+            else:
+                rows = self._query_universe(types)
         except ImportError:
             logger.warning(
                 "tradingview-screener not installed — DB fallback used. "
@@ -127,52 +146,20 @@ class TradingViewService:
         logger.info("TradingView fetched %d rows", len(data))
         return data
 
-    def fetch_and_store(self, symbols=None, db=None):
+    def fetch_and_store(self, symbols=None):
         """Fetch from TradingView and upsert into ``financial_metrics``.
 
-        Returns number of rows upserted, or None if fetch failed.
+        Thin delegate to the single write path — this class only knows how to
+        *read* the upstream feed, never how to persist it.
+
+        Returns number of rows upserted, or None if the fetch failed.
         """
-        if db is None and self.app is not None:
-            from app.extensions import db as _db
-
-            db = _db
-
         data = self.fetch_financial_data(symbols=symbols)
         if data is None:
             return None
+        from app.services.market_snapshot_service import market_snapshot_service
 
-        from app.models.company import Company
-        from app.models.financial_metric import FinancialMetric
-        from datetime import date
-
-        today = date.today()
-        count = 0
-        for row in data:
-            symbol = row.get("symbol")
-            if not symbol:
-                continue
-            # Only upsert companies known in our DB (keeps FK valid)
-            if not Company.query.filter_by(symbol=symbol).first():
-                continue
-            existing = FinancialMetric.query.filter_by(
-                symbol=symbol, date=today
-            ).first()
-            if existing:
-                for key, val in row.items():
-                    if key not in ("symbol", "date") and val is not None:
-                        setattr(existing, key, val)
-            else:
-                db.session.add(
-                    FinancialMetric(symbol=symbol, date=today, **{
-                        k: v for k, v in row.items()
-                        if k not in ("symbol", "date", "sector")
-                    })
-                )
-            count += 1
-
-        db.session.commit()
-        logger.info("Upserted %d financial_metrics rows", count)
-        return count
+        return market_snapshot_service.upsert(data, source="tradingview")
 
     def get_market_fields_metadata(self):
         """Return metadata for market/technical filter fields (Dimension A)."""
@@ -302,15 +289,75 @@ class TradingViewService:
         _, df = q.get_scanner_data()
         return df.to_dict("records")
 
+    def _query_universe(self, types="stock"):
+        """Scan the entire US market (used by the daily ETL and live refresh)."""
+        from tradingview_screener import Query, col
+
+        q = (
+            Query()
+            .select(*TV_COLUMNS, "description", "industry", "exchange", "type")
+            .set_markets("america")
+            .where()
+            .limit(100_000)
+        )
+        if types != "all":
+            q = q.where(col("type") == types)
+        total, df = q.get_scanner_data()
+        logger.info("TradingView universe scan: %s symbols (type=%s)", total, types)
+        return df.to_dict("records")
+
     @staticmethod
-    def _normalize(row):
+    def _num(value):
+        """NaN / pandas NA → None so nothing invalid reaches the database."""
+        if value is None:
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass
+        return value
+
+    @classmethod
+    def _normalize(cls, row):
         """Map a raw TradingView row to the FinancialMetric schema."""
-        out = {"symbol": row.get("name"), "sector": row.get("sector")}
+        pick = lambda *names: next(  # noqa: E731 — first non-null alias wins
+            (cls._num(row.get(n)) for n in names if cls._num(row.get(n)) is not None),
+            None,
+        )
+
+        # Identity fields ride along so the daily ETL can maintain the
+        # ``companies`` table from the same scan (the snapshot service ignores
+        # anything outside MERGE_FIELDS).
+        out = {
+            "symbol": row.get("name"),
+            "name": cls._num(row.get("description")),
+            "sector": cls._num(row.get("sector")),
+            "industry": cls._num(row.get("industry")),
+            "exchange": cls._num(row.get("exchange")),
+        }
         for col, field in COLUMN_MAP.items():
-            out[field] = row.get(col)
+            if col == "Perf.Y":
+                continue  # handled below via FIELD_FALLBACKS
+            out[field] = cls._num(row.get(col))
+
         # Direct 1:1 columns
-        for col in ("close", "volume", "turnover"):
-            out[col] = row.get(col)
+        out["close"] = cls._num(row.get("close"))
+        out["volume"] = cls._num(row.get("volume"))
+
+        # Aliased columns (rename-tolerant)
+        for field, names in FIELD_FALLBACKS.items():
+            out[field] = pick(*names)
+
+        # Derived: turnover rate (%) = shares traded / free float.
+        # The scanner dropped its own ``turnover`` column in 2026.
+        volume = out.get("volume")
+        free_float = cls._num(row.get("float_shares_outstanding"))
+        out["turnover"] = (
+            round(float(volume) / float(free_float) * 100, 4)
+            if volume is not None and free_float
+            else None
+        )
         return out
 
 

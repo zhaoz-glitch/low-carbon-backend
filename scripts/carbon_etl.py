@@ -213,40 +213,23 @@ def run_etl(min_revenue: float = 0.0, dry_run: bool = False) -> dict:
             db.session.execute(db.insert(Company), missing)
             logger.info("companies: %d inserted (FK targets)", len(missing))
 
-        # --- persist revenue into financial_metrics for today ---
-        today = date.today()
-        existing_today = {
-            fm.symbol: fm.id
-            for fm in db.session.query(
-                FinancialMetric.id, FinancialMetric.symbol
-            ).filter(FinancialMetric.date == today).all()
-        }
-        rev_updates = [
-            {
-                "id": existing_today[r["symbol"]],
-                "revenue": r["revenue"],
-                **({"revenue_growth": rev_growth[r["symbol"]]}
-                   if r["symbol"] in rev_growth else {}),
-            }
-            for r in rows
-            if r["symbol"] in existing_today
-        ]
-        rev_inserts = [
-            {
-                "symbol": r["symbol"], "date": today,
-                "revenue": r["revenue"],
-                "revenue_growth": rev_growth.get(r["symbol"]),
-            }
-            for r in rows if r["symbol"] not in existing_today
-        ]
-        if rev_updates:
-            db.session.bulk_update_mappings(FinancialMetric, rev_updates)
-        if rev_inserts:
-            db.session.execute(db.insert(FinancialMetric), rev_inserts)
-        logger.info(
-            "financial_metrics.revenue: %d updated, %d inserted",
-            len(rev_updates), len(rev_inserts),
+        # --- persist revenue into each company's market snapshot row ---
+        # Carbon contributes only revenue fields; the snapshot service merges
+        # them in without touching price/valuation data or the as_of_date.
+        from app.services.market_snapshot_service import market_snapshot_service
+
+        written = market_snapshot_service.upsert(
+            [
+                {
+                    "symbol": r["symbol"],
+                    "revenue": r["revenue"],
+                    "revenue_growth": rev_growth.get(r["symbol"]),
+                }
+                for r in rows
+            ],
+            source="carbon-etl",
         )
+        logger.info("financial_metrics.revenue: %d snapshot rows updated", written)
 
         # --- upsert carbon_emissions ---
         existing_carbon = {

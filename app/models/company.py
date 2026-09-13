@@ -1,7 +1,12 @@
-"""Company model — basic stock info.
+"""Company model — static company identity only.
 
 Maps to the ``companies`` table described in the PRD.  Each row represents a
 single publicly-traded company identified by its ticker symbol.
+
+**No market data lives here.**  Price, volume, market cap and every valuation
+ratio are owned by ``financial_metrics`` (one snapshot row per company).  The
+old duplicated ``companies.market_cap`` column has been removed so the two
+tables cannot drift apart again.
 """
 
 from datetime import datetime, timezone
@@ -16,7 +21,9 @@ class Company(db.Model):
     sector = db.Column(db.String(100))  # e.g. "Technology"
     industry = db.Column(db.String(200))
     exchange = db.Column(db.String(50))  # e.g. "NASDAQ"
-    market_cap = db.Column(db.Numeric(20, 2))  # in USD
+    # NOTE: market_cap used to live here too. It is now owned exclusively by
+    # financial_metrics.market_cap — do not add a market figure back to this
+    # table (see docs/schema.md).
     isin = db.Column(db.String(12), index=True)  # Clarity AI security id
 
     created_at = db.Column(
@@ -45,7 +52,6 @@ class Company(db.Model):
             "sector": self.sector,
             "industry": self.industry,
             "exchange": self.exchange,
-            "market_cap": float(self.market_cap) if self.market_cap else None,
             "isin": self.isin,
         }
 

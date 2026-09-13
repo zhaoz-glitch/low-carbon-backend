@@ -96,13 +96,8 @@ def get_stock_detail(symbol):
     if not company:
         return jsonify({"error": "Stock not found", "symbol": symbol}), 404
 
-    # Latest financial metrics
-    latest_fin = (
-        FinancialMetric.query
-        .filter_by(symbol=symbol)
-        .order_by(FinancialMetric.date.desc())
-        .first()
-    )
+    # The company's single market snapshot (one row per symbol).
+    latest_fin = FinancialMetric.query.filter_by(symbol=symbol).first()
 
     # Latest carbon emission data
     latest_carbon = (

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 from flask import current_app
 
@@ -13,8 +13,8 @@ from app.extensions import db
 from app.models.carbon_emission import CarbonEmission
 from app.models.company import Company
 from app.models.data_sync_log import DataSyncLog
-from app.models.financial_metric import FinancialMetric
 from app.services.carbon_service import carbon_service
+from app.services.market_snapshot_service import market_snapshot_service
 from app.services.tradingview_service import tradingview_service
 from app.universe import COMPANY_ISINS, universe_symbols
 
@@ -57,50 +57,14 @@ def recover_stale_jobs(minutes: int = 0):
         logger.info("Marked %s stale sync jobs as failed", len(stale))
 
 
-def upsert_financial_rows(rows: list[dict]) -> int:
-    """Insert or update financial_metrics by (symbol, date).
+def upsert_financial_rows(rows: list[dict], source: str = "tradingview") -> int:
+    """Persist a batch of market rows through the single snapshot write path.
 
-    TradingView rows carry no explicit date (the snapshot is "now"), so a
-    missing ``date`` defaults to today — previously those rows were silently
-    skipped, freezing prices at the last full ETL run.
+    ``financial_metrics`` holds exactly one row per company, so this is an
+    upsert on ``symbol`` — never an append of a new dated row.  Fields missing
+    from the payload keep their stored value (see ``market_snapshot_service``).
     """
-    count = 0
-    today = date.today()
-    for row in rows:
-        symbol = row.get("symbol")
-        as_of = row.get("date") or today
-        if isinstance(as_of, str):
-            as_of = date.fromisoformat(as_of)
-        if not symbol:
-            continue
-        if Company.query.filter_by(symbol=symbol).first() is None:
-            continue
-        existing = FinancialMetric.query.filter_by(symbol=symbol, date=as_of).first()
-        fields = {
-            "close": row.get("close"),
-            "volume": row.get("volume"),
-            "market_cap": row.get("market_cap"),
-            "pe_ttm": row.get("pe_ttm"),
-            "pb": row.get("pb"),
-            "dividend_yield": row.get("dividend_yield"),
-            "turnover": row.get("turnover"),
-            "week_52_change": row.get("week_52_change"),
-            "net_profit_margin": row.get("net_profit_margin"),
-            "revenue_growth": row.get("revenue_growth"),
-            "data_source": row.get("data_source") or "tradingview",
-        }
-        if existing:
-            for key, val in fields.items():
-                if val is not None:
-                    setattr(existing, key, val)
-        else:
-            db.session.add(FinancialMetric(symbol=symbol, date=as_of, **fields))
-        company = Company.query.filter_by(symbol=symbol).first()
-        if company and fields.get("market_cap") is not None:
-            company.market_cap = fields["market_cap"]
-        count += 1
-    db.session.commit()
-    return count
+    return market_snapshot_service.upsert(rows, source=source)
 
 
 def _yoy_from_previous(symbol: str, report_year: int, intensity) -> float | None:
@@ -167,10 +131,10 @@ def sync_market(symbols=None, reason: str = "manual") -> dict:
         return _finish_log(log, "skipped", "disabled", 0, "TRADINGVIEW_ENABLED=false")
 
     try:
-        rows = tradingview_service.fetch_financial_data(
-            symbols or universe_symbols(),
-            allow_tvkit=(reason != "live-cache"),
-        )
+        # No symbol subset → scan the whole US market.  Previously this fell
+        # back to a 20-symbol sample universe, which is why most tickers kept
+        # a stale price between daily ETL runs.
+        rows = tradingview_service.fetch_financial_data(symbols)
         if not rows:
             return _finish_log(
                 log,
@@ -179,7 +143,7 @@ def sync_market(symbols=None, reason: str = "manual") -> dict:
                 0,
                 "TradingView returned no rows — keeping last database snapshot",
             )
-        n = upsert_financial_rows(rows)
+        n = upsert_financial_rows(rows, source=reason)
         return _finish_log(log, "success", "tradingview", n, reason)
     except Exception as exc:
         logger.exception("Market sync failed")
@@ -259,14 +223,19 @@ _last_live_fetch = 0.0
 
 
 def maybe_refresh_live_quotes() -> dict | None:
-    """Refresh today's snapshot if CACHE_TTL has elapsed (screener hot path)."""
+    """Refresh the market snapshot if the live-quote TTL has elapsed.
+
+    Called on the screener hot path.  The refresh is a full-market scan, so it
+    runs on its own TTL (``LIVE_QUOTES_TTL``, default 15 min) rather than the
+    5-minute in-process response cache.
+    """
     global _last_live_fetch
     app = current_app
     if not app.config.get("TRADINGVIEW_ENABLED", True):
         return None
     if not app.config.get("LIVE_QUOTES", True):
         return None
-    ttl = int(app.config.get("CACHE_TTL", 300))
+    ttl = int(app.config.get("LIVE_QUOTES_TTL", 900))
     now = time.time()
     if now - _last_live_fetch < ttl:
         return None
