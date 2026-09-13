@@ -28,8 +28,8 @@ def _bodies(code: str, user_name: str | None = None) -> tuple[str, str]:
     <body style="font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif; color: #1e293b; background: #f8fafc; padding: 40px 20px;">
       <div style="max-width: 480px; margin: 0 auto; background: #ffffff; border-radius: 20px; padding: 40px; box-shadow: 0 4px 24px rgba(0,0,0,0.06);">
         <div style="text-align: center; margin-bottom: 32px;">
-          <h1 style="font-size: 22px; font-weight: 800; color: #064e3b; margin: 0;">低碳价值筛选器</h1>
-          <p style="font-size: 13px; color: #64748b; margin: 4px 0 0;">Low-Carbon Value Screener</p>
+          <h1 style="font-size: 22px; font-weight: 800; color: #064e3b; margin: 0;">GreenStocks</h1>
+          <p style="font-size: 13px; color: #64748b; margin: 4px 0 0;">greenstocks.online</p>
         </div>
         <p style="font-size: 15px; line-height: 1.6; color: #334155;">{greeting}</p>
         <p style="font-size: 15px; line-height: 1.6; color: #334155;">
@@ -72,7 +72,7 @@ def send_reset_email(to_email: str, code: str, user_name: str | None = None) -> 
     smtp_host = (current_app.config.get("SMTP_HOST") or "").strip()
 
     text_body, html_body = _bodies(code, user_name)
-    subject = "低碳价值筛选器 · 密码重置验证码"
+    subject = "GreenStocks · 密码重置验证码"
 
     if api_key:
         try:

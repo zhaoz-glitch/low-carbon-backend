@@ -37,7 +37,7 @@ def _resend_configured(app) -> bool:
 
 def _send_via_resend(app, to: str, subject: str, html: str, text: str) -> bool:
     """POST to Resend's REST API.  Returns True on 2xx."""
-    from_name = app.config.get("MAIL_FROM_NAME") or "低碳价值筛选器"
+    from_name = app.config.get("MAIL_FROM_NAME") or "GreenStocks"
     from_addr = app.config.get("MAIL_FROM") or ""
 
     # Resend free tier requires the sender domain to be verified.
@@ -94,7 +94,7 @@ def _smtp_configured(app) -> bool:
 def send_email(to: str, subject: str, html: str, text: str) -> bool:
     """Send a message to ``to``.  Returns True if handled (sent or logged)."""
     app = current_app._get_current_object()
-    from_name = app.config.get("MAIL_FROM_NAME") or "低碳价值筛选器"
+    from_name = app.config.get("MAIL_FROM_NAME") or "GreenStocks"
     from_addr = app.config.get("MAIL_FROM") or app.config.get("MAIL_SMTP_USER") or "noreply@localhost"
 
     if _resend_configured(app):
@@ -145,10 +145,10 @@ def send_email(to: str, subject: str, html: str, text: str) -> bool:
 
 def send_password_reset_code(to: str, code: str) -> bool:
     """Send the 6-digit reset code with a friendly bilingual-ish template."""
-    subject = "[低碳价值筛选器] 密码重置验证码"
+    subject = "[GreenStocks] 密码重置验证码"
     text = (
         f"你好，\n\n"
-        f"你正在重置低碳价值筛选器的登录密码，验证码是：{code}\n"
+        f"你正在重置 GreenStocks（greenstocks.online）的登录密码，验证码是：{code}\n"
         f"验证码 15 分钟内有效，请勿转发给他人。\n\n"
         f"如果不是你本人的操作，请忽略这封邮件。"
     )
@@ -157,7 +157,7 @@ def send_password_reset_code(to: str, code: str) -> bool:
             padding:24px;background:#f9fafb;border-radius:12px;color:#111827;">
   <h2 style="margin:0 0 12px;font-size:18px;">密码重置验证码</h2>
   <p style="font-size:14px;line-height:1.6;margin:0 0 16px;">
-    你好，你正在重置 <strong>低碳价值筛选器</strong> 的登录密码。
+    你好，你正在重置 <strong>GreenStocks</strong>（greenstocks.online）的登录密码。
   </p>
   <div style="text-align:center;margin:24px 0;">
     <span style="display:inline-block;padding:14px 28px;font-size:28px;font-weight:700;letter-spacing:6px;

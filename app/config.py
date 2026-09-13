@@ -119,7 +119,7 @@ class Config:
     MAIL_SMTP_USER = os.environ.get("MAIL_SMTP_USER", "")
     MAIL_SMTP_PASSWORD = os.environ.get("MAIL_SMTP_PASSWORD", "")
     MAIL_FROM = os.environ.get("MAIL_FROM", "")
-    MAIL_FROM_NAME = os.environ.get("MAIL_FROM_NAME", "低碳价值筛选器")
+    MAIL_FROM_NAME = os.environ.get("MAIL_FROM_NAME", "GreenStocks")
 
     # Pagination
     DEFAULT_PAGE_SIZE = int(os.environ.get("DEFAULT_PAGE_SIZE", 50))
@@ -127,7 +127,7 @@ class Config:
 
     # Password-reset email (Resend HTTPS, or SMTP). Empty = log the code in DEBUG.
     RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
-    EMAIL_FROM = os.environ.get("EMAIL_FROM", "低碳价值筛选器 <noreply@lowcarbon.io>")
+    EMAIL_FROM = os.environ.get("EMAIL_FROM", "GreenStocks <noreply@greenstocks.online>")
     SMTP_HOST = os.environ.get("SMTP_HOST", "")
     SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
     SMTP_USER = os.environ.get("SMTP_USER", "")
